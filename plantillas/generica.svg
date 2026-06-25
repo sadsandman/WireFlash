@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Plantilla de hoja para WireFlash (marco + cajetín empresarial).
+
+  NORMA de placeholders (el programa los sobrescribe con los datos del proyecto):
+    {{project}}  {{assembly}}  {{author}}  {{version}}  {{date}}  {{page}}  {{pages}}
+
+  El rect id="content" define la zona donde el programa dibuja el BOM / diagrama.
+  Diseñada sobre A4 vertical (210x297 mm); se estira al tamaño/orientación elegidos.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 297" font-family="Helvetica">
+  <!-- borde de la hoja -->
+  <rect x="6" y="6" width="198" height="285" fill="none" stroke="#222222" stroke-width="0.6"/>
+
+  <!-- zona util para el contenido (invisible) -->
+  <rect id="content" x="10" y="10" width="190" height="245" fill="none" stroke="none"/>
+
+  <!-- cajetin -->
+  <g stroke="#222222" stroke-width="0.4" fill="none">
+    <rect x="6" y="261" width="198" height="30"/>
+    <line x1="36" y1="261" x2="36" y2="291"/>
+    <line x1="120" y1="261" x2="120" y2="291"/>
+    <line x1="36" y1="271" x2="204" y2="271"/>
+    <line x1="36" y1="281" x2="204" y2="281"/>
+  </g>
+  <text x="21" y="278" font-size="4" text-anchor="middle" fill="#888888">LOGO</text>
+
+  <!-- etiquetas -->
+  <g font-size="2.6" fill="#666666">
+    <text x="38" y="265">PROYECTO</text>
+    <text x="122" y="265">ENSAMBLAJE</text>
+    <text x="38" y="275">AUTOR</text>
+    <text x="122" y="275">VERSION</text>
+    <text x="38" y="285">FECHA</text>
+    <text x="122" y="285">HOJA</text>
+  </g>
+
+  <!-- valores (sustituidos por el programa) -->
+  <g font-size="4.2" fill="#111111">
+    <text x="38" y="269.5">{{project}}</text>
+    <text x="122" y="269.5">{{assembly}}</text>
+    <text x="38" y="279.5">{{author}}</text>
+    <text x="122" y="279.5">{{version}}</text>
+    <text x="38" y="289.5">{{date}}</text>
+    <text x="122" y="289.5">{{page}}/{{pages}}</text>
+  </g>
+</svg>

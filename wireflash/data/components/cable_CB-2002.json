@@ -1,0 +1,15 @@
+{
+  "part_number": "Tensility 30-00425",
+  "manufacturer": "Tensility",
+  "description": "Cable multiconductor AWG22 4 hilos",
+  "gauge": "22",
+  "conductor_colors": [
+    "RD",
+    "BK",
+    "WH",
+    "GN"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2002"
+}

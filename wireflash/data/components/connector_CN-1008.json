@@ -1,0 +1,20 @@
+{
+  "part_number": "DB9-F",
+  "manufacturer": "Generic",
+  "description": "D-Sub 9 female",
+  "category": "D-Sub",
+  "color": "#1565c0",
+  "pins": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9"
+  ],
+  "kind": "connector",
+  "sku": "CN-1008"
+}

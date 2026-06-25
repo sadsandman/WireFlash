@@ -1,0 +1,17 @@
+{
+  "part_number": "Tensility 30-00430",
+  "manufacturer": "Tensility",
+  "description": "Cable multiconductor AWG24 6 hilos",
+  "gauge": "24",
+  "conductor_colors": [
+    "RD",
+    "BK",
+    "WH",
+    "GN",
+    "YE",
+    "BU"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2003"
+}

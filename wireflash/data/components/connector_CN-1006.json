@@ -1,0 +1,17 @@
+{
+  "part_number": "Micro-Fit 43025-06",
+  "manufacturer": "Molex",
+  "description": "Micro-Fit 3.0 dual row 6 circuit",
+  "category": "Wire-to-board",
+  "color": "#4e342e",
+  "pins": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6"
+  ],
+  "kind": "connector",
+  "sku": "CN-1006"
+}

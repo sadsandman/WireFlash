@@ -1,0 +1,13 @@
+{
+  "part_number": "Power 2C AWG16",
+  "manufacturer": "Generic",
+  "description": "Cable de potencia AWG16 2 hilos",
+  "gauge": "16",
+  "conductor_colors": [
+    "RD",
+    "BK"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2006"
+}

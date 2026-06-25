@@ -1,0 +1,13 @@
+{
+  "part_number": "Tensility 30-00420",
+  "manufacturer": "Tensility",
+  "description": "Cable multiconductor AWG22 2 hilos apantallado",
+  "gauge": "22",
+  "conductor_colors": [
+    "RD",
+    "BK"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2001"
+}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#11181f"/>
+  <!-- conectores -->
+  <rect x="28" y="92" width="40" height="72" rx="6" fill="#37474f" stroke="#78909c" stroke-width="3"/>
+  <rect x="188" y="92" width="40" height="72" rx="6" fill="#37474f" stroke="#78909c" stroke-width="3"/>
+  <!-- hilos -->
+  <path d="M68 112 H120 M136 112 H188" stroke="#e53935" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <path d="M68 144 H120 M136 144 H188" stroke="#1e88e5" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <!-- rayo (flash) -->
+  <path d="M138 80 L112 130 H132 L118 178 L156 122 H134 Z"
+        fill="#fdd835" stroke="#11181f" stroke-width="3" stroke-linejoin="round"/>
+</svg>

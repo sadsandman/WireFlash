@@ -1,0 +1,12 @@
+{
+  "part_number": "RING-M6",
+  "manufacturer": "Generic",
+  "description": "Terminal de anillo M6",
+  "category": "Terminal",
+  "color": "#6d4c41",
+  "pins": [
+    "1"
+  ],
+  "kind": "connector",
+  "sku": "CN-1010"
+}

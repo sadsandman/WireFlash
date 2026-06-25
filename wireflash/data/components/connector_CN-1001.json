@@ -1,0 +1,14 @@
+{
+  "kind": "connector",
+  "sku": "CN-1001",
+  "part_number": "DTM04-2P",
+  "manufacturer": "TE / Deutsch",
+  "description": "DTM Receptacle 2-way",
+  "category": "Automotive sealed",
+  "color": "#455a64",
+  "image": "images/2026-06-22_21-22-be42ec.png",
+  "pins": [
+    "1",
+    "2"
+  ]
+}

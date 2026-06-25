@@ -1,0 +1,15 @@
+{
+  "part_number": "M12-A-4P",
+  "manufacturer": "Generic",
+  "description": "M12 A-coded 4-pin",
+  "category": "Industrial",
+  "color": "#00695c",
+  "pins": [
+    "1",
+    "2",
+    "3",
+    "4"
+  ],
+  "kind": "connector",
+  "sku": "CN-1009"
+}

@@ -1,0 +1,15 @@
+{
+  "part_number": "DeviceNet thin",
+  "manufacturer": "Generic",
+  "description": "Bus AWG22 4 hilos + drenaje",
+  "gauge": "22",
+  "conductor_colors": [
+    "RD",
+    "BK",
+    "BU",
+    "WH"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2005"
+}

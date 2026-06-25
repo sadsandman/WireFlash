@@ -1,0 +1,13 @@
+# Empaquetado
+/build/
+/dist/
+*.AppImage
+appimagetool-*.AppImage
+
+# Entorno y cachés
+/.venv/
+__pycache__/
+*.pyc
+
+# Datos de usuario generados al ejecutar (en dev se versiona librerias/ de ejemplo)
+/ensamblajes/

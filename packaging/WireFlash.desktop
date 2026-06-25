@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WireFlash
+GenericName=Editor de arneses de cableado
+Comment=Diseno de arneses: lienzo, librerias, BOM, tabla de corte y PDF
+Exec=WireFlash
+Icon=wireflash
+Categories=Engineering;Electronics;Development;
+Terminal=false

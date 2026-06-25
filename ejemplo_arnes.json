@@ -1,0 +1,244 @@
+{
+  "name": "Ejemplo WireViz",
+  "connectors": [
+    {
+      "ref": "X1",
+      "sku": "CN-1003",
+      "part_number": "DT04-6P",
+      "manufacturer": "TE / Deutsch",
+      "description": "DT Receptacle 6-way",
+      "color": "#37474f",
+      "x": 40,
+      "y": 80,
+      "side": "right",
+      "image": "",
+      "pins": [
+        {
+          "number": "1",
+          "name": "VBAT",
+          "id": "c56b62b8"
+        },
+        {
+          "number": "2",
+          "name": "GND",
+          "id": "2cfc3ef5"
+        },
+        {
+          "number": "3",
+          "name": "SIG",
+          "id": "a5769ae7"
+        },
+        {
+          "number": "4",
+          "name": "",
+          "id": "4b131dee"
+        },
+        {
+          "number": "5",
+          "name": "",
+          "id": "714c12d2"
+        },
+        {
+          "number": "6",
+          "name": "",
+          "id": "c6ff7de1"
+        }
+      ],
+      "id": "a093bf1a"
+    },
+    {
+      "ref": "X2",
+      "sku": "CN-1002",
+      "part_number": "DTM04-4P",
+      "manufacturer": "TE / Deutsch",
+      "description": "DTM Receptacle 4-way",
+      "color": "#455a64",
+      "x": 560,
+      "y": 100,
+      "side": "left",
+      "image": "",
+      "pins": [
+        {
+          "number": "1",
+          "name": "",
+          "id": "31e12be2"
+        },
+        {
+          "number": "2",
+          "name": "",
+          "id": "0a3fe5e8"
+        },
+        {
+          "number": "3",
+          "name": "",
+          "id": "baa7e219"
+        },
+        {
+          "number": "4",
+          "name": "",
+          "id": "a95578d8"
+        }
+      ],
+      "id": "947a1986"
+    }
+  ],
+  "cables": [
+    {
+      "ref": "W1",
+      "sku": "CB-2002",
+      "part_number": "Tensility 30-00425",
+      "manufacturer": "Tensility",
+      "description": "Cable multiconductor AWG22 4 hilos",
+      "gauge": "22",
+      "conductor_colors": [
+        "RD",
+        "BK",
+        "WH",
+        "GN"
+      ],
+      "length_mm": 850,
+      "x": 300,
+      "y": 90,
+      "image": "",
+      "id": "73d8d89e"
+    }
+  ],
+  "wires": [
+    {
+      "a": {
+        "kind": "conn",
+        "node": "a093bf1a",
+        "port": "c56b62b8"
+      },
+      "b": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "0:L"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "be59e589"
+    },
+    {
+      "a": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "0:R"
+      },
+      "b": {
+        "kind": "conn",
+        "node": "947a1986",
+        "port": "31e12be2"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "08b702fd"
+    },
+    {
+      "a": {
+        "kind": "conn",
+        "node": "a093bf1a",
+        "port": "2cfc3ef5"
+      },
+      "b": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "1:L"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "c03c1295"
+    },
+    {
+      "a": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "1:R"
+      },
+      "b": {
+        "kind": "conn",
+        "node": "947a1986",
+        "port": "0a3fe5e8"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "be2216ad"
+    },
+    {
+      "a": {
+        "kind": "conn",
+        "node": "a093bf1a",
+        "port": "a5769ae7"
+      },
+      "b": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "2:L"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "663cae07"
+    },
+    {
+      "a": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "2:R"
+      },
+      "b": {
+        "kind": "conn",
+        "node": "947a1986",
+        "port": "baa7e219"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "d64073e5"
+    },
+    {
+      "a": {
+        "kind": "conn",
+        "node": "a093bf1a",
+        "port": "4b131dee"
+      },
+      "b": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "3:L"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "22966f79"
+    },
+    {
+      "a": {
+        "kind": "cable",
+        "node": "73d8d89e",
+        "port": "3:R"
+      },
+      "b": {
+        "kind": "conn",
+        "node": "947a1986",
+        "port": "a95578d8"
+      },
+      "gauge": "20",
+      "color": "BK",
+      "signal": "",
+      "length_mm": 0.0,
+      "id": "29ba0b5c"
+    }
+  ]
+}

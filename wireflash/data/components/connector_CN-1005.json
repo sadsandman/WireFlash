@@ -1,0 +1,15 @@
+{
+  "part_number": "Mini-Fit 5557-04",
+  "manufacturer": "Molex",
+  "description": "Mini-Fit Jr. 4 circuit",
+  "category": "Wire-to-wire",
+  "color": "#5d4037",
+  "pins": [
+    "1",
+    "2",
+    "3",
+    "4"
+  ],
+  "kind": "connector",
+  "sku": "CN-1005"
+}

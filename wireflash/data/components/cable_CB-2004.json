@@ -1,0 +1,13 @@
+{
+  "part_number": "Belden 9841",
+  "manufacturer": "Belden",
+  "description": "Par trenzado AWG24 (RS-485)",
+  "gauge": "24",
+  "conductor_colors": [
+    "BU",
+    "WH"
+  ],
+  "kind": "cable",
+  "category": "Cables",
+  "sku": "CB-2004"
+}

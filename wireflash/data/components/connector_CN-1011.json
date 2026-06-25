@@ -1,0 +1,14 @@
+{
+  "part_number": "SPLICE",
+  "manufacturer": "Generic",
+  "description": "Empalme / splice",
+  "category": "Splice",
+  "color": "#9e9e9e",
+  "pins": [
+    "1",
+    "2",
+    "3"
+  ],
+  "kind": "connector",
+  "sku": "CN-1011"
+}

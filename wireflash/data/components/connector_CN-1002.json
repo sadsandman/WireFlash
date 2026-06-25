@@ -1,0 +1,16 @@
+{
+  "kind": "connector",
+  "sku": "CN-1002",
+  "part_number": "DTM04-4P",
+  "manufacturer": "TE / Deutsch",
+  "description": "DTM Receptacle 4-way",
+  "category": "Automotive sealed",
+  "color": "#455a64",
+  "image": "images/2026-06-22_21-22-04f8fd.png",
+  "pins": [
+    "1",
+    "2",
+    "3",
+    "4"
+  ]
+}

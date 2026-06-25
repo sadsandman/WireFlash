@@ -1,0 +1,14 @@
+{
+  "part_number": "Superseal 1.5 3w",
+  "manufacturer": "TE",
+  "description": "Superseal 1.5 sealed 3-way",
+  "category": "Automotive sealed",
+  "color": "#263238",
+  "pins": [
+    "1",
+    "2",
+    "3"
+  ],
+  "kind": "connector",
+  "sku": "CN-1007"
+}
