@@ -13,13 +13,32 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
+import re
 import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+# Extensiones propias (estilo KiCad): el proyecto es una carpeta con un archivo
+# de proyecto que referencia los ensamblajes (cada uno en su propio archivo).
+PROJECT_EXT = ".wfproj"
+ASSEMBLY_EXT = ".wfasm"
+
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _safe_filename(name: str, used: set[str]) -> str:
+    """Nombre de archivo seguro y único (sin extensión) para un ensamblaje."""
+    base = re.sub(r"[^\w.-]+", "_", name.strip()) or "ensamblaje"
+    cand = base
+    n = 2
+    while cand.lower() in used:
+        cand = f"{base}_{n}"
+        n += 1
+    used.add(cand.lower())
+    return cand
 
 
 def _filter(cls, d: dict) -> dict:
@@ -257,6 +276,7 @@ class Harness:
         self.cables: list[Cable] = []
         self.terminals: list[Terminal] = []
         self.wires: list[Wire] = []
+        self.filename: str | None = None   # nombre de archivo propio (.rhasm), no serializado
 
     # ----- conectores -------------------------------------------------
     def next_ref(self) -> str:
@@ -497,3 +517,62 @@ class Project:
     def load(cls, path: str) -> "Project":
         with open(path, encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
+
+    # ----- formato carpeta (estilo KiCad) ----------------------------
+    def save_project(self, project_file: str) -> None:
+        """Guarda el proyecto como una carpeta: un archivo de proyecto
+        (PROJECT_EXT) que referencia un archivo por ensamblaje (ASSEMBLY_EXT)
+        en la MISMA carpeta."""
+        folder = os.path.dirname(os.path.abspath(project_file))
+        os.makedirs(folder, exist_ok=True)
+        # archivos que este proyecto tenía antes (para borrar los que sobren)
+        old_refs = {h.filename for h in self.assemblies if h.filename}
+        used: set[str] = set()
+        refs: list[str] = []
+        for h in self.assemblies:
+            # el nombre de archivo SIGUE al nombre del ensamblaje (si lo
+            # renombras, el .rhasm se renombra al guardar)
+            fname = _safe_filename(h.name, used) + ASSEMBLY_EXT
+            h.filename = fname
+            h.save(os.path.join(folder, fname))
+            refs.append(fname)
+        # borra los .rhasm que este proyecto ya no usa (p.ej. tras renombrar)
+        for old in old_refs - set(refs):
+            try:
+                os.remove(os.path.join(folder, old))
+            except OSError:
+                pass
+        data = {
+            "kind": "project",
+            "name": self.name,
+            "author": self.author,
+            "version": self.version,
+            "logo": self.logo,
+            "assembly_files": refs,
+        }
+        with open(project_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def load_project(cls, project_file: str) -> "Project":
+        """Carga un proyecto-carpeta: lee el archivo de proyecto y cada
+        ensamblaje referenciado desde la misma carpeta."""
+        folder = os.path.dirname(os.path.abspath(project_file))
+        with open(project_file, encoding="utf-8") as f:
+            d = json.load(f)
+        # archivos de ensamblaje externos -> formato carpeta
+        if "assembly_files" in d:
+            p = cls(d.get("name", "Proyecto"))
+            p.author = d.get("author", "")
+            p.version = d.get("version", "")
+            p.logo = d.get("logo", "")
+            p.assemblies = []
+            for fname in d.get("assembly_files", []):
+                h = Harness.load(os.path.join(folder, fname))
+                h.filename = fname
+                p.assemblies.append(h)
+            if not p.assemblies:
+                p.assemblies = [Harness("Ensamblaje 1")]
+            return p
+        # si no, es el formato antiguo (todo embebido)
+        return cls.from_dict(d)

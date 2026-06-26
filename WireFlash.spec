@@ -47,4 +47,5 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    icon='appicon.ico',
 )

@@ -23,46 +23,58 @@ from .model import Cable, Connector, Pin, Terminal
 
 _FROZEN = getattr(sys, "frozen", False)
 _PKG_DIR = os.path.dirname(__file__)
+# nombre del paquete (rapidharness / wireflash): sirve para el data dir
+# empaquetado y para la carpeta de datos de usuario, sin fijar la marca.
+_PKG_NAME = __package__ or os.path.basename(_PKG_DIR)
 
 # --- datos de fabrica (libreria estandar): empaquetados con la app ---
 if _FROZEN and hasattr(sys, "_MEIPASS"):
-    _DATA_DIR = os.path.join(sys._MEIPASS, "wireflash", "data")
+    _DATA_DIR = os.path.join(sys._MEIPASS, _PKG_NAME, "data")
 else:
     _DATA_DIR = os.path.join(_PKG_DIR, "data")
 _BUILTIN_DIR = os.path.join(_DATA_DIR, "components")
 
+
+def app_icon_path() -> str:
+    """Ruta al icono de la app (empaquetado en data/), o "" si no existe."""
+    p = os.path.join(_DATA_DIR, "appicon.png")
+    return p if os.path.exists(p) else ""
+
 # --- carpeta raiz estilo KiCad: editable/compartible por el usuario ---
-# Desarrollo: raiz del proyecto.
-# Empaquetado: junto al ejecutable si se puede escribir ahi (portable, p.ej.
-# el .exe de Windows); si no (AppImage se monta en SOLO LECTURA), una carpeta
-# de datos del usuario del sistema.
-def _user_data_root() -> str:
-    if sys.platform.startswith("win"):
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.join(base, "WireFlash")
-
-
-def _writable_dir(path: str) -> bool:
+# Debe ser ESCRIBIBLE. En un AppImage el ejecutable se monta en /tmp (solo
+# lectura), asi que se usa la carpeta del propio archivo .AppImage (variable
+# APPIMAGE); si no es escribible, se cae a ~/.local/share/<app>.
+def _is_writable(d: str) -> bool:
     try:
-        os.makedirs(path, exist_ok=True)
-        probe = os.path.join(path, ".write_test")
-        with open(probe, "w") as f:
-            f.write("ok")
-        os.remove(probe)
+        os.makedirs(d, exist_ok=True)
+        t = os.path.join(d, ".write_test")
+        with open(t, "w"):
+            pass
+        os.remove(t)
         return True
     except OSError:
         return False
 
 
-if _FROZEN:
-    _exe_root = os.path.dirname(sys.executable)
-    _PROJECT_ROOT = _exe_root if _writable_dir(_exe_root) else _user_data_root()
-else:
-    _PROJECT_ROOT = os.path.dirname(_PKG_DIR)
+def _pick_project_root() -> str:
+    candidates: list[str] = []
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        candidates.append(os.path.dirname(os.path.abspath(appimage)))
+    if _FROZEN:
+        candidates.append(os.path.dirname(sys.executable))
+    else:
+        candidates.append(os.path.dirname(_PKG_DIR))
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share")
+    candidates.append(os.path.join(xdg, _PKG_NAME))
+    for c in candidates:
+        if _is_writable(c):
+            return c
+    return candidates[-1]
+
+
+_PROJECT_ROOT = _pick_project_root()
 LIBRARIES_ROOT = os.path.join(_PROJECT_ROOT, "librerias")
 
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".svg", ".gif")

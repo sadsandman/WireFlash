@@ -26,33 +26,8 @@ from . import reports
 from .scene import HarnessScene
 from .templates import PAGE_SIZES, FrameTemplate
 
-_MAX_IMG_PX = 2400
-
-
 def _mm(v: float, dpi: float) -> float:
     return v / 25.4 * dpi
-
-
-# ---- diagrama del ensamblaje a imagen (fondo blanco) -------------------
-def _render_harness_image(h, scale: float = 2.0) -> QImage:
-    s = HarnessScene(h)
-    s.setBackgroundBrush(QColor("white"))
-    s.grid_color = QColor("#e3e3e3")
-    rect = s.itemsBoundingRect()
-    if rect.isEmpty():
-        rect = QRectF(0, 0, 600, 300)
-    rect = rect.adjusted(-20, -20, 20, 20)
-    longest = max(rect.width(), rect.height()) or 1
-    scale = min(scale, _MAX_IMG_PX / longest)
-    w = max(1, int(rect.width() * scale))
-    hpx = max(1, int(rect.height() * scale))
-    img = QImage(w, hpx, QImage.Format_ARGB32)
-    img.fill(Qt.white)
-    p = QPainter(img)
-    p.setRenderHint(QPainter.Antialiasing)
-    s.render(p, QRectF(0, 0, w, hpx), rect)
-    p.end()
-    return img
 
 
 # ---- BOM como documento paginable --------------------------------------
@@ -96,8 +71,15 @@ def _draw_doc_page(painter, doc, content: QRectF, page_index: int) -> None:
     painter.restore()
 
 
-def _draw_diagram(painter, img: QImage, content: QRectF, dpi: float,
+_DIAGRAM_MAX_PX = 6000  # tope de seguridad para hojas grandes (A1/A2)
+
+
+def _draw_diagram(painter, h, content: QRectF, dpi: float,
                   title: str) -> None:
+    """Dibuja el diagrama del ensamblaje **sin rejilla**, rasterizado a la
+    resolución de destino del PDF (nítido) y con las proporciones de texto
+    correctas (las fuentes en puntos no se deforman como al pintar vectorial
+    sobre un dispositivo de alta resolución)."""
     painter.save()
     head_h = _mm(8, dpi)
     f = QFont("Helvetica", 11); f.setBold(True)
@@ -106,9 +88,31 @@ def _draw_diagram(painter, img: QImage, content: QRectF, dpi: float,
                      Qt.AlignLeft | Qt.AlignVCenter, title)
     area = QRectF(content.x(), content.y() + head_h,
                   content.width(), content.height() - head_h)
-    iw, ih = img.width() or 1, img.height() or 1
-    scale = min(area.width() / iw, area.height() / ih)
-    w, hpx = iw * scale, ih * scale
+
+    s = HarnessScene(h)
+    s.draw_grid = False
+    s.show_frame = False
+    s.setBackgroundBrush(QColor("white"))
+    src = s.itemsBoundingRect()
+    if src.isEmpty():
+        src = QRectF(0, 0, 600, 300)
+    src = src.adjusted(-20, -20, 20, 20)
+
+    # encaje manteniendo proporción; la imagen se renderiza a los píxeles
+    # reales del destino en el PDF (1:1) -> sin pixelado
+    fit = min(area.width() / src.width(), area.height() / src.height())
+    fit = min(fit, _DIAGRAM_MAX_PX / max(src.width(), src.height()))
+    w = max(1, int(src.width() * fit))
+    hpx = max(1, int(src.height() * fit))
+    img = QImage(w, hpx, QImage.Format_ARGB32)
+    img.fill(Qt.white)
+    ip = QPainter(img)
+    ip.setRenderHint(QPainter.Antialiasing)
+    ip.setRenderHint(QPainter.TextAntialiasing)
+    ip.setRenderHint(QPainter.SmoothPixmapTransform)
+    s.render(ip, QRectF(0, 0, w, hpx), src)
+    ip.end()
+
     target = QRectF(area.x() + (area.width() - w) / 2, area.y(), w, hpx)
     painter.drawImage(target, img)
     painter.restore()
@@ -126,7 +130,7 @@ def export_pdf(assemblies, path: str, fields_base: dict, *,
     writer.setPageOrientation(
         QPageLayout.Landscape if landscape else QPageLayout.Portrait)
     writer.setPageMargins(QMarginsF(0, 0, 0, 0))
-    writer.setResolution(150)
+    writer.setResolution(300)
     dpi = writer.resolution()
     page = QRectF(0, 0, writer.width(), writer.height())
     content = template.content_rect(page, dpi)
@@ -134,19 +138,21 @@ def export_pdf(assemblies, path: str, fields_base: dict, *,
     base = dict(fields_base)
     base.setdefault("date", date.today().isoformat())
 
-    # descriptores de página: (nombre_ensamblaje, doc|None, idx_pag, img|None)
+    # descriptores de página: (nombre_ensamblaje, doc|None, idx_pag, harness|None)
     descriptors: list[tuple] = []
     for h in assemblies:
         doc = _bom_doc(h, content)
         for pi in range(max(1, doc.pageCount())):
             descriptors.append((h.name, doc, pi, None))
-        descriptors.append((h.name, None, 0, _render_harness_image(h)))
+        descriptors.append((h.name, None, 0, h))
     total = len(descriptors)
 
     painter = QPainter(writer)
     painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.TextAntialiasing)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
     try:
-        for idx, (aname, doc, pi, img) in enumerate(descriptors):
+        for idx, (aname, doc, pi, diagram_h) in enumerate(descriptors):
             if idx > 0:
                 writer.newPage()
             fields = dict(base)
@@ -155,7 +161,7 @@ def export_pdf(assemblies, path: str, fields_base: dict, *,
             if doc is not None:
                 _draw_doc_page(painter, doc, content, pi)
             else:
-                _draw_diagram(painter, img, content, dpi,
+                _draw_diagram(painter, diagram_h, content, dpi,
                               f"{aname} — Diagrama")
     finally:
         painter.end()

@@ -20,6 +20,18 @@ from PySide6.QtWidgets import (
 
 from .model import Cable, Connector, Endpoint, Terminal, Wire, WIRE_COLORS
 
+# escala global de los items gráficos (conectores, cables, terminales, puertos).
+# 1.0 = tamaño base; se ajusta desde Configuración y se aplica por nodo con
+# QGraphicsItem.setScale, de modo que TODO lo dibujado (geometría, fuentes y
+# líneas) escala de forma uniforme.
+GRAPHICS_SCALE = 1.0
+
+
+def set_graphics_scale(s: float) -> None:
+    global GRAPHICS_SCALE
+    GRAPHICS_SCALE = max(0.1, float(s))
+
+
 BOX_WIDTH = 140
 HEADER_H = 30
 IMAGE_BAND = 72          # alto de la banda de imagen (entre el nombre y los pines)
@@ -134,6 +146,7 @@ class _NodeMixin:
     def _init_node(self, model):
         self.model = model
         self.setPos(model.x, model.y)
+        self.setScale(GRAPHICS_SCALE)
         self.setFlags(QGraphicsItem.ItemIsMovable
                       | QGraphicsItem.ItemIsSelectable
                       | QGraphicsItem.ItemSendsGeometryChanges)
@@ -578,6 +591,7 @@ class WireItem(QGraphicsPathItem):
                (b.kind == "terminal" and b.port == "dock")
 
     def set_style(self, gauge: str, color: str):
+        self._outline = None
         if self.is_dock:
             self._pen = QPen(QColor("#78909c"), 3.0,
                              Qt.SolidLine, Qt.FlatCap, Qt.MiterJoin)
@@ -588,9 +602,15 @@ class WireItem(QGraphicsPathItem):
             g = int(gauge)
         except (TypeError, ValueError):
             g = 20
-        self._pen = QPen(col, max(2.0, 6.0 - g * 0.15),
+        width = max(2.0, 6.0 - g * 0.15)
+        self._pen = QPen(col, width,
                          Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         self.setPen(self._pen)
+        # contorno oscuro para hilos muy claros (p.ej. blanco), que si no se
+        # pierden sobre el fondo blanco de la hoja
+        if col.lightnessF() > 0.7:
+            self._outline = QPen(QColor("#222222"), width + 1.6,
+                                 Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
     def update_path(self):
         a = self.src.scene_nub()
@@ -626,6 +646,9 @@ class WireItem(QGraphicsPathItem):
             hl = QPen(QColor("#ffb300"), self._pen.widthF() + 4)
             hl.setCapStyle(Qt.RoundCap)
             p.setPen(hl)
+            p.drawPath(self.path())
+        if getattr(self, "_outline", None) is not None:
+            p.setPen(self._outline)
             p.drawPath(self.path())
         super().paint(p, option, widget)
         label = self._length_label()

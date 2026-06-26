@@ -57,6 +57,16 @@ def _mm(v: float, dpi: float) -> float:
     return v / 25.4 * dpi
 
 
+def page_size_mm(page_name: str, landscape: bool = False) -> tuple[float, float]:
+    """Tamaño (ancho, alto) en milímetros de una hoja, según orientación."""
+    qs = QPageSize(PAGE_SIZES.get(page_name, QPageSize.A4))
+    s = qs.size(QPageSize.Millimeter)
+    w, h = s.width(), s.height()
+    if landscape:
+        w, h = h, w
+    return w, h
+
+
 def substitute_svg(svg_text: str, fields: dict) -> str:
     """Reemplaza los placeholders {{token}} por los valores (XML-escapados)."""
     out = svg_text

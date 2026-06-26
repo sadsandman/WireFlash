@@ -115,3 +115,32 @@ def saved_theme() -> str:
 def save_theme(name: str) -> None:
     if name in THEMES:
         _settings().setValue("theme", name)
+
+
+# --- escala de gráficos (tamaño de conectores/cables/terminales) ---------
+DEFAULT_SCALE = 0.85
+MIN_SCALE, MAX_SCALE = 0.4, 1.5
+
+
+def saved_scale() -> float:
+    try:
+        s = float(_settings().value("graphics_scale", DEFAULT_SCALE))
+    except (TypeError, ValueError):
+        s = DEFAULT_SCALE
+    return min(MAX_SCALE, max(MIN_SCALE, s))
+
+
+def save_scale(s: float) -> None:
+    _settings().setValue("graphics_scale", float(s))
+
+
+# --- rutas de librerías externas (gestor de librerías) -------------------
+def saved_library_paths() -> list[str]:
+    raw = _settings().value("library_paths", "")
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw if str(x).strip()]
+    return [p for p in str(raw).split("\n") if p.strip()]
+
+
+def save_library_paths(paths: list[str]) -> None:
+    _settings().setValue("library_paths", "\n".join(paths))

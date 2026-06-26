@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 from PySide6.QtCore import QByteArray, QMimeData, Qt
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDrag, QKeySequence
+from PySide6.QtGui import (
+    QAction, QActionGroup, QBrush, QColor, QCursor, QDrag, QIcon, QKeySequence)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,13 +36,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import items
 from . import pdfexport
 from . import reports
-from .dialogs import ComponentEditorDialog, PdfExportDialog, ProjectInfoDialog
+from .dialogs import (
+    ComponentEditorDialog,
+    LibraryManagerDialog,
+    PdfExportDialog,
+    ProjectInfoDialog,
+    SettingsDialog,
+)
 from .templates import FrameTemplate
 from .library import (
     ComponentLibrary,
     TerminalPart,
+    app_icon_path,
     assembly_path_for,
     discover_assemblies,
     discover_libraries,
@@ -48,8 +58,10 @@ from .library import (
     ensure_libraries_root,
     import_library_folder,
 )
+from .items import CableItem, ConnectorItem, TerminalItem
 from .model import (
-    AWG_SIZES, Cable, Connector, Harness, Project, Terminal, WIRE_COLORS, Wire)
+    AWG_SIZES, ASSEMBLY_EXT, Cable, Connector, Endpoint, Harness, Project,
+    PROJECT_EXT, Terminal, WIRE_COLORS, Wire)
 from .scene import HarnessScene
 from .view import HarnessView
 from . import theme
@@ -256,18 +268,37 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("WireFlash — editor local de arneses")
         self.resize(1500, 920)
+        _icon = app_icon_path()
+        if _icon:
+            icon = QIcon(_icon)
+            self.setWindowIcon(icon)
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
 
         ensure_libraries_root()
         ensure_assemblies_root()
-        self.libraries: list[ComponentLibrary] = (
-            [ComponentLibrary.load_builtin()] + discover_libraries())
+        self.library_paths: list[str] = theme.saved_library_paths()
+        self.libraries: list[ComponentLibrary] = []
+        self._load_all_libraries()
         self.project = Project("Proyecto sin titulo")
         self.project.add_assembly(Harness("Ensamblaje 1"))
         self._active = 0
         self.harness = self.project.assemblies[0]
         self.current_path: str | None = None
+        self._clipboard: dict | None = None   # copiar/pegar de nodos
+
+        # estado del marco de hoja (plantilla en el lienzo)
+        self.page_name = "A4"
+        self.landscape = False
+        self.show_frame = True
+
+        # escala de gráficos (configurable, persistida)
+        self._graphics_scale = theme.saved_scale()
+        items.set_graphics_scale(self._graphics_scale)
 
         self._make_scene()
+        self._apply_page_to_scene()
         self.view = HarnessView(self.scene)
         self.setCentralWidget(self.view)
 
@@ -523,7 +554,15 @@ class MainWindow(QMainWindow):
 
     # ----- toolbar / menu --------------------------------------------
     def _build_toolbar(self) -> None:
-        tb = QToolBar("Hilo")
+        tb = QToolBar("Acciones")
+        # botón de guardar (el atajo Ctrl+S lo aporta la acción del menú)
+        a_save = QAction("💾 Guardar", self)
+        a_save.triggered.connect(self.save_file)
+        tb.addAction(a_save)
+        a_save_asm = QAction("Guardar ensamblaje", self)
+        a_save_asm.triggered.connect(self.save_current_assembly)
+        tb.addAction(a_save_asm)
+        tb.addSeparator()
         tb.addWidget(QLabel(" Hilo suelto — AWG: "))
         self.gauge_combo = QComboBox(); self.gauge_combo.addItems(AWG_SIZES)
         self.gauge_combo.setCurrentText(self.scene.default_gauge)
@@ -562,6 +601,8 @@ class MainWindow(QMainWindow):
         self._act(en, "Duplicar ensamblaje", None,
                   lambda: self.duplicate_assembly(self._active))
         en.addSeparator()
+        self._act(en, "Guardar ensamblaje actual…", None,
+                  self.save_current_assembly)
         self._act(en, "Añadir desde librería de ensamblajes…", None,
                   self.add_assembly_from_library)
         self._act(en, "Guardar ensamblaje en librería…", None,
@@ -571,18 +612,56 @@ class MainWindow(QMainWindow):
                   lambda: self.remove_assembly(self._active))
 
         e = self.menuBar().addMenu("&Edición")
+        # atajos acotados al lienzo para no pisar el copiar/pegar de los
+        # campos de texto del panel de propiedades
+        for text, seq, slot in (
+                ("Copiar", QKeySequence.Copy, self.copy_selection),
+                ("Cortar", QKeySequence.Cut, self.cut_selection),
+                ("Pegar", QKeySequence.Paste, self.paste_clipboard)):
+            a = QAction(text, self)
+            a.setShortcut(seq)
+            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            a.triggered.connect(slot)
+            e.addAction(a)
+            self.view.addAction(a)
+        e.addSeparator()
         self._act(e, "Borrar selección", QKeySequence.Delete, self.scene.delete_selected)
         self._act(e, "Cancelar conexión (Esc)", None, self.scene.cancel_pending)
 
         lib = self.menuBar().addMenu("&Librería")
+        self._act(lib, "Gestor de librerías…", None, self.manage_libraries)
+        lib.addSeparator()
         self._act(lib, "Nueva librería…", None, self.new_library)
         self._act(lib, "Importar librería (carpeta)…", None, self.import_library)
-        self._act(lib, "Cargar librería externa (carpeta)…", None, self.load_library)
         lib.addSeparator()
         self._act(lib, "Nuevo componente…", None, self.open_component_editor)
         self._act(lib, "Abrir carpeta de librerías…", None, self.reveal_libraries_root)
 
         v = self.menuBar().addMenu("&Ver")
+
+        hoja = v.addMenu("Plantilla de hoja")
+        self._frame_act = QAction("Mostrar marco y cajetín", self, checkable=True)
+        self._frame_act.setChecked(self.show_frame)
+        self._frame_act.triggered.connect(self._toggle_frame)
+        hoja.addAction(self._frame_act); self.addAction(self._frame_act)
+        hoja.addSeparator()
+        smenu = hoja.addMenu("Tamaño")
+        self._page_size_group = QActionGroup(self)
+        self._page_size_group.setExclusive(True)
+        for nm in ("A4", "A3", "A2", "A1"):
+            a = QAction(nm, self, checkable=True)
+            a.setChecked(nm == self.page_name)
+            a.triggered.connect(lambda _=False, n=nm: self._set_page_size(n))
+            self._page_size_group.addAction(a); smenu.addAction(a)
+        omenu = hoja.addMenu("Orientación")
+        self._page_orient_group = QActionGroup(self)
+        self._page_orient_group.setExclusive(True)
+        for label, land in (("Vertical", False), ("Horizontal", True)):
+            a = QAction(label, self, checkable=True)
+            a.setChecked(land == self.landscape)
+            a.triggered.connect(lambda _=False, l=land: self._set_page_orient(l))
+            self._page_orient_group.addAction(a); omenu.addAction(a)
+
         tema = v.addMenu("Tema")
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
@@ -593,6 +672,9 @@ class MainWindow(QMainWindow):
             self._theme_group.addAction(a)
             tema.addAction(a)
             self._theme_actions[name] = a
+
+        v.addSeparator()
+        self._act(v, "Configuración…", None, self.open_settings)
 
     def _act(self, menu, text, shortcut, slot):
         a = QAction(text, self)
@@ -615,6 +697,49 @@ class MainWindow(QMainWindow):
         if act is not None and not act.isChecked():
             act.setChecked(True)
         theme.save_theme(name)
+
+    # ----- marco de hoja (plantilla en el lienzo) --------------------
+    def _frame_fields(self) -> dict:
+        from datetime import date
+        return {
+            "project": self.project.name,
+            "assembly": self.harness.name,
+            "author": self.project.author,
+            "version": self.project.version,
+            "logo": self.project.logo,
+            "date": date.today().isoformat(),
+        }
+
+    def _apply_page_to_scene(self) -> None:
+        self.scene.frame_fields = self._frame_fields()
+        self.scene.set_page(self.page_name, self.landscape, self.show_frame)
+
+    def _toggle_frame(self, checked: bool) -> None:
+        self.show_frame = bool(checked)
+        self.scene.set_page(show=self.show_frame)
+
+    def _set_page_size(self, name: str) -> None:
+        self.page_name = name
+        self.scene.set_page(page_name=name)
+
+    def _set_page_orient(self, landscape: bool) -> None:
+        self.landscape = landscape
+        self.scene.set_page(landscape=landscape)
+
+    # ----- configuración (escala de gráficos) ------------------------
+    def open_settings(self) -> None:
+        dlg = SettingsDialog(
+            int(round(self._graphics_scale * 100)),
+            int(theme.MIN_SCALE * 100), int(theme.MAX_SCALE * 100), self)
+        if dlg.exec():
+            self.set_graphics_scale(dlg.result_scale())
+
+    def set_graphics_scale(self, scale: float) -> None:
+        self._graphics_scale = scale
+        items.set_graphics_scale(scale)
+        theme.save_scale(scale)
+        self.scene.rebuild()
+        self.scene.update()
 
     # ----- alta de componentes ---------------------------------------
     def find_component(self, spec: str):
@@ -642,6 +767,40 @@ class MainWindow(QMainWindow):
             self.scene.add_component(comp, pos)
 
     # ----- librerias --------------------------------------------------
+    def _load_all_libraries(self) -> None:
+        """Reconstruye self.libraries: estándar embebida + carpeta ``librerias/``
+        + cada ruta externa guardada en el gestor de librerías."""
+        libs: list[ComponentLibrary] = (
+            [ComponentLibrary.load_builtin()] + discover_libraries())
+        seen = {os.path.abspath(l.directory) for l in libs if l.directory}
+        for p in self.library_paths:
+            if not os.path.isdir(p):
+                continue
+            ap = os.path.abspath(p)
+            if ap in seen:
+                continue
+            try:
+                libs.append(ComponentLibrary.load(p))
+                seen.add(ap)
+            except Exception:
+                pass
+        self.libraries = libs
+        if hasattr(self, "part_tree"):
+            self.part_tree.libraries = self.libraries
+            self.part_tree.populate()
+
+    def manage_libraries(self):
+        dlg = LibraryManagerDialog(
+            list(self.library_paths), root_hint=ensure_libraries_root(),
+            parent=self)
+        if not dlg.exec():
+            return
+        self.library_paths = dlg.result_paths()
+        theme.save_library_paths(self.library_paths)
+        self._load_all_libraries()
+        self.statusBar().showMessage(
+            f"Librerías recargadas ({len(self.libraries)} en total)", 5000)
+
     def load_library(self):
         d = QFileDialog.getExistingDirectory(self, "Carpeta de librería externa")
         if d:
@@ -1236,44 +1395,202 @@ class MainWindow(QMainWindow):
         self._reload_scene()
 
     def open_file(self):
+        flt = (f"Proyecto ({'*' + PROJECT_EXT});;"
+               f"Ensamblaje ({'*' + ASSEMBLY_EXT});;"
+               "Proyecto / Arnés JSON (*.json);;Todos (*)")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Abrir proyecto o arnés", "", "Proyecto / Arnés JSON (*.json)")
-        if path:
-            try:
-                # Project.load detecta proyecto o arnés suelto (compatibilidad)
+            self, "Abrir proyecto o ensamblaje", "", flt)
+        if not path:
+            return
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == PROJECT_EXT:
+                self.project = Project.load_project(path)
+            elif ext == ASSEMBLY_EXT:
+                # abrir un ensamblaje suelto como proyecto de un solo ensamblaje
+                h = Harness.load(path)
+                h.filename = os.path.basename(path)
+                self.project = Project(h.name or "Proyecto")
+                self.project.assemblies = [h]
+            else:
+                # compatibilidad: JSON antiguo (proyecto o arnés embebido)
                 self.project = Project.load(path)
-                self._active = 0
-                self.harness = self.project.assemblies[0]
-                self.current_path = path
-                self._refresh_assembly_list()
-                self._reload_scene()
-            except Exception as exc:
-                QMessageBox.critical(self, "Error", f"No se pudo abrir:\n{exc}")
+            self._active = 0
+            self.harness = self.project.assemblies[0]
+            self.current_path = path
+            self._refresh_assembly_list()
+            self._reload_scene()
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"No se pudo abrir:\n{exc}")
+
+    def _save_to(self, path: str) -> None:
+        """Guarda según la extensión: formato carpeta (PROJECT_EXT) o JSON."""
+        if os.path.splitext(path)[1].lower() == PROJECT_EXT:
+            self.project.save_project(path)
+        else:
+            self.project.save(path)
 
     def save_file(self):
         if self.current_path:
-            self.project.save(self.current_path)
+            self._save_to(self.current_path)
             self.statusBar().showMessage(f"Guardado en {self.current_path}", 4000)
             self.refresh_reports()
         else:
             self.save_file_as()
 
     def save_file_as(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Guardar proyecto",
-                                              f"{self.project.name}.json",
-                                              "Proyecto JSON (*.json)")
-        if path:
-            # si el proyecto sigue sin nombre propio, toma el del archivo
-            if not self.project.name or self.project.name == "Proyecto sin titulo":
-                self.project.name = os.path.splitext(os.path.basename(path))[0]
-            self.project.save(path)
-            self.current_path = path
+        if not self.project.name or self.project.name == "Proyecto sin titulo":
+            suggested = "Proyecto"
+        else:
+            suggested = self.project.name
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar proyecto (se creará una carpeta con su nombre)",
+            f"{suggested}{PROJECT_EXT}",
+            f"Proyecto ({'*' + PROJECT_EXT});;Proyecto JSON (*.json)")
+        if not path:
+            return
+        # extensión por defecto si el usuario no la escribió
+        if not os.path.splitext(path)[1]:
+            path += PROJECT_EXT
+        # si el proyecto sigue sin nombre propio, toma el del archivo
+        if not self.project.name or self.project.name == "Proyecto sin titulo":
+            self.project.name = os.path.splitext(os.path.basename(path))[0]
+        # formato carpeta: inicializa una carpeta con el nombre del proyecto
+        if os.path.splitext(path)[1].lower() == PROJECT_EXT:
+            base = os.path.splitext(os.path.basename(path))[0]
+            folder = os.path.dirname(path)
+            if os.path.basename(folder) != base:
+                folder = os.path.join(folder, base)
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, base + PROJECT_EXT)
+        try:
+            self._save_to(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar:\n{exc}")
+            return
+        self.current_path = path
+        if os.path.splitext(path)[1].lower() == PROJECT_EXT:
+            self.statusBar().showMessage(
+                f"Proyecto guardado en la carpeta: {os.path.dirname(path)}", 6000)
+        else:
             self.statusBar().showMessage(f"Guardado en {path}", 4000)
-            self.refresh_reports()
+        self.refresh_reports()
+
+    def save_current_assembly(self):
+        """Guarda SOLO el ensamblaje activo en su propio archivo."""
+        default = f"{self.harness.name}{ASSEMBLY_EXT}"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar ensamblaje", default,
+            f"Ensamblaje ({'*' + ASSEMBLY_EXT});;JSON (*.json)")
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ASSEMBLY_EXT
+        try:
+            self.harness.save(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar:\n{exc}")
+            return
+        self.harness.filename = os.path.basename(path)
+        self.statusBar().showMessage(f"Ensamblaje guardado: {path}", 4000)
+
+    # ----- copiar / cortar / pegar (nodos) ---------------------------
+    def copy_selection(self) -> bool:
+        nodes: list[tuple] = []
+        node_ids: set[str] = set()
+        for it in self.scene.selectedItems():
+            if isinstance(it, ConnectorItem):
+                nodes.append(("conn", it.connector.to_dict()))
+                node_ids.add(it.connector.id)
+            elif isinstance(it, CableItem):
+                nodes.append(("cable", it.cable.to_dict()))
+                node_ids.add(it.cable.id)
+            elif isinstance(it, TerminalItem):
+                nodes.append(("terminal", it.terminal.to_dict()))
+                node_ids.add(it.terminal.id)
+        if not nodes:
+            return False
+        # incluye los hilos cuyos dos extremos estén dentro de la selección
+        wires = [w.to_dict() for w in self.harness.wires
+                 if w.a.node in node_ids and w.b.node in node_ids]
+        self._clipboard = {"nodes": nodes, "wires": wires}
+        self.statusBar().showMessage(
+            f"Copiado: {len(nodes)} elemento(s)", 3000)
+        return True
+
+    def cut_selection(self) -> None:
+        if self.copy_selection():
+            self.scene.delete_selected()
+
+    def _paste_target_scene(self):
+        """Posición de escena donde pegar: bajo el ratón si está sobre el
+        lienzo; si no, el centro de la vista."""
+        vp = self.view.viewport()
+        local = vp.mapFromGlobal(QCursor.pos())
+        if vp.rect().contains(local):
+            return self.view.mapToScene(local)
+        return self.view.mapToScene(vp.rect().center())
+
+    def paste_clipboard(self) -> None:
+        cb = self._clipboard
+        if not cb or not cb.get("nodes"):
+            return
+        # ancla = esquina sup-izq del grupo copiado; se traslada al ratón
+        xs = [d.get("x", 0.0) for _, d in cb["nodes"]]
+        ys = [d.get("y", 0.0) for _, d in cb["nodes"]]
+        target = self._paste_target_scene()
+        ox, oy = target.x() - min(xs), target.y() - min(ys)
+
+        def place(obj):
+            obj.x = round((obj.x + ox) / 10) * 10
+            obj.y = round((obj.y + oy) / 10) * 10
+
+        nid = lambda: uuid.uuid4().hex[:8]
+        idmap: dict[str, str] = {}
+        pinmap: dict[str, str] = {}
+        new_ids: list[str] = []
+        for kind, d in cb["nodes"]:
+            if kind == "conn":
+                c = Connector.from_dict(d)
+                idmap[c.id] = c.id = nid()
+                c.ref = self.harness.next_ref()
+                place(c)
+                for p in c.pins:
+                    pinmap[p.id] = p.id = nid()
+                self.harness.add_connector(c); new_ids.append(c.id)
+            elif kind == "cable":
+                c = Cable.from_dict(d)
+                idmap[c.id] = c.id = nid()
+                c.ref = self.harness.next_cable_ref()
+                place(c)
+                self.harness.add_cable(c); new_ids.append(c.id)
+            elif kind == "terminal":
+                t = Terminal.from_dict(d)
+                idmap[t.id] = t.id = nid()
+                t.ref = self.harness.next_terminal_ref()
+                place(t)
+                self.harness.add_terminal(t); new_ids.append(t.id)
+        for wd in cb.get("wires", []):
+            w = Wire.from_dict(wd)
+            w.id = nid()
+            w.a = Endpoint(w.a.kind, idmap.get(w.a.node, w.a.node),
+                           pinmap.get(w.a.port, w.a.port))
+            w.b = Endpoint(w.b.kind, idmap.get(w.b.node, w.b.node),
+                           pinmap.get(w.b.port, w.b.port))
+            self.harness.add_wire(w)
+        self.scene.rebuild()
+        for i in new_ids:
+            item = self.scene._node_items.get(i)
+            if item is not None:
+                item.setSelected(True)
+        self.refresh_reports()
+        self.statusBar().showMessage(
+            f"Pegado: {len(new_ids)} elemento(s)", 3000)
 
     def edit_project_info(self):
         dlg = ProjectInfoDialog(self.project, self)
         if dlg.exec():
+            self._apply_page_to_scene()
             self.refresh_reports()
 
     def _export(self, func, default_name):
@@ -1328,5 +1645,6 @@ class MainWindow(QMainWindow):
         self.scene.default_gauge = self.gauge_combo.currentText()
         self.scene.default_color = self.color_combo.currentText()
         self.view.setScene(self.scene)
+        self._apply_page_to_scene()
         self.show_properties(None)
         self.refresh_reports()

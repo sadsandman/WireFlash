@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -119,6 +121,97 @@ class PdfExportDialog(QDialog):
             "svg_path": (self.svg.text().strip()
                          if self.template.currentData() == "svg" else ""),
         }
+
+
+class SettingsDialog(QDialog):
+    """Configuración general: escala de los gráficos del lienzo."""
+
+    def __init__(self, scale_pct: int, min_pct: int, max_pct: int,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configuración")
+        self.resize(420, 160)
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+
+        row = QHBoxLayout()
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(min_pct, max_pct)
+        self.slider.setValue(scale_pct)
+        self.spin = QSpinBox()
+        self.spin.setRange(min_pct, max_pct)
+        self.spin.setSuffix(" %")
+        self.spin.setSingleStep(5)
+        self.spin.setValue(scale_pct)
+        self.slider.valueChanged.connect(self.spin.setValue)
+        self.spin.valueChanged.connect(self.slider.setValue)
+        row.addWidget(self.slider, 1)
+        row.addWidget(self.spin)
+        form.addRow("Escala de gráficos\n(conectores, cables, terminales)",
+                    _wrap(row))
+        lay.addLayout(form)
+
+        hint = QLabel("Afecta a todo lo dibujado en el lienzo. La hoja (A4/A3…) "
+                      "mantiene su tamaño físico, así que con una escala menor "
+                      "caben más componentes en la hoja.")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#90a4ae;")
+        lay.addWidget(hint)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def result_scale(self) -> float:
+        return self.spin.value() / 100.0
+
+
+class LibraryManagerDialog(QDialog):
+    """Gestor de librerías: rutas externas a cargar (además de ``librerias/``)."""
+
+    def __init__(self, paths: list[str], root_hint: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Gestor de librerías")
+        self.resize(560, 360)
+        lay = QVBoxLayout(self)
+
+        if root_hint:
+            info = QLabel(
+                "Las librerías de la carpeta estándar se cargan solas:\n"
+                f"{root_hint}\n\n"
+                "Aquí puedes añadir carpetas EXTERNAS adicionales (cada carpeta "
+                "es una librería). Se recuerdan entre sesiones.")
+            info.setWordWrap(True); info.setStyleSheet("color:#90a4ae;")
+            lay.addWidget(info)
+
+        self.list = QListWidget()
+        for p in paths:
+            self.list.addItem(QListWidgetItem(p))
+        lay.addWidget(self.list, 1)
+
+        row = QHBoxLayout()
+        add = QPushButton("Añadir carpeta…"); add.clicked.connect(self._add)
+        rem = QPushButton("Quitar seleccionada"); rem.clicked.connect(self._remove)
+        row.addWidget(add); row.addWidget(rem); row.addStretch(1)
+        lay.addLayout(row)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _add(self):
+        d = QFileDialog.getExistingDirectory(self, "Carpeta de librería")
+        if not d:
+            return
+        existing = {self.list.item(i).text() for i in range(self.list.count())}
+        if d not in existing:
+            self.list.addItem(QListWidgetItem(d))
+
+    def _remove(self):
+        for it in self.list.selectedItems():
+            self.list.takeItem(self.list.row(it))
+
+    def result_paths(self) -> list[str]:
+        return [self.list.item(i).text() for i in range(self.list.count())]
 
 
 def _wrap(layout):

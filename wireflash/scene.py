@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Signal
+from PySide6.QtCore import QPointF, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsScene
 
 from .items import CableItem, ConnectorItem, PortItem, TerminalItem, WireItem
 from .library import CablePart, Part, TerminalPart
 from .model import Cable, Endpoint, Harness, Terminal, Wire
+from .templates import FrameTemplate, page_size_mm
+
+# escala del lienzo: 96 ppp -> 1 mm = 3.7795 unidades de escena
+PX_PER_MM = 96.0 / 25.4
 
 
 class HarnessScene(QGraphicsScene):
@@ -22,6 +26,13 @@ class HarnessScene(QGraphicsScene):
         self.bg_color = QColor("#0f1419")
         self.grid_color = QColor("#1b2630")
         self.setBackgroundBrush(self.bg_color)
+        # rejilla y marco de hoja (la rejilla queda desactivada: se veía mal)
+        self.draw_grid = False
+        self.show_frame = False
+        self.page_name = "A4"
+        self.landscape = False
+        self.frame_template: FrameTemplate | None = None  # None -> genérica
+        self.frame_fields: dict = {}
         self._node_items: dict[str, object] = {}      # node_id -> Connector/CableItem
         self._wire_items: dict[str, WireItem] = {}
         self._pending: PortItem | None = None
@@ -198,9 +209,42 @@ class HarnessScene(QGraphicsScene):
         self.setBackgroundBrush(self.bg_color)
         self.update()
 
+    # ----- hoja / marco -----------------------------------------------
+    def page_rect(self) -> QRectF:
+        w, h = page_size_mm(self.page_name, self.landscape)
+        return QRectF(0, 0, w * PX_PER_MM, h * PX_PER_MM)
+
+    def set_page(self, page_name: str | None = None,
+                 landscape: bool | None = None,
+                 show: bool | None = None) -> None:
+        if page_name is not None:
+            self.page_name = page_name
+        if landscape is not None:
+            self.landscape = landscape
+        if show is not None:
+            self.show_frame = show
+        self.update()
+
+    def drawForeground(self, painter: QPainter, rect) -> None:
+        super().drawForeground(painter, rect)
+        if not self.show_frame:
+            return
+        tpl = self.frame_template or FrameTemplate.generic(
+            self.frame_fields.get("logo", ""))
+        fields = dict(self.frame_fields)
+        fields.setdefault("page", 1)
+        fields.setdefault("pages", 1)
+        painter.save()
+        tpl.draw(painter, self.page_rect(), PX_PER_MM * 25.4, fields)
+        painter.restore()
+
     # ----- rejilla ----------------------------------------------------
     def drawBackground(self, painter: QPainter, rect) -> None:
         super().drawBackground(painter, rect)
+        if self.show_frame:
+            painter.fillRect(self.page_rect(), QColor("#fbfbf7"))
+        if not self.draw_grid:
+            return
         step = 50
         pen = QPen(self.grid_color); pen.setWidth(0)
         painter.setPen(pen)
