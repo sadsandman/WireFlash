@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt
+from PySide6.QtCore import QByteArray, QMimeData, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction, QActionGroup, QBrush, QColor, QCursor, QDrag, QIcon, QKeySequence)
 from PySide6.QtWidgets import (
@@ -36,18 +36,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import items
-from . import pdfexport
-from . import reports
-from .dialogs import (
+from ..view import icons
+from ..view import items
+from . import pdf_export as pdfexport
+from ..model import reports
+from ..view.dialogs import (
+    AssemblyBlockDialog,
     ComponentEditorDialog,
     LibraryManagerDialog,
     PdfExportDialog,
     ProjectInfoDialog,
     SettingsDialog,
 )
-from .templates import FrameTemplate
-from .library import (
+from ..model.templates import FrameTemplate
+from ..model.library import (
     ComponentLibrary,
     TerminalPart,
     app_icon_path,
@@ -58,13 +60,13 @@ from .library import (
     ensure_libraries_root,
     import_library_folder,
 )
-from .items import CableItem, ConnectorItem, TerminalItem
-from .model import (
-    AWG_SIZES, ASSEMBLY_EXT, Cable, Connector, Endpoint, Harness, Project,
+from ..view.items import CableItem, ConnectorItem, NoteItem, TerminalItem
+from ..model import (
+    AWG_SIZES, ASSEMBLY_EXT, Cable, Connector, Endpoint, Harness, Note, Project,
     PROJECT_EXT, Terminal, WIRE_COLORS, Wire)
-from .scene import HarnessScene
-from .view import HarnessView
-from . import theme
+from ..view.scene import HarnessScene
+from ..view.canvas import HarnessView
+from ..view import theme
 
 SIDE_LABELS = [("Derecha", "right"), ("Izquierda", "left"),
                ("Arriba", "top"), ("Abajo", "bottom")]
@@ -114,11 +116,8 @@ class PartTree(QTreeWidget):
                 ln.addChild(kg)
                 self._fill_group(kg, lib, lib.cables, "cable")
                 kg.setExpanded(True)
-            if lib.terminals:
-                tg = QTreeWidgetItem(["Terminales"])
-                ln.addChild(tg)
-                self._fill_group(tg, lib, lib.terminals, "terminal")
-                tg.setExpanded(True)
+            # Los terminales NO se listan como nodos sueltos: no se arrastran al
+            # lienzo, solo se asocian a un conector desde su editor de librería.
             ln.setExpanded(True)
         self.apply_filter(self._filter)
 
@@ -288,6 +287,15 @@ class MainWindow(QMainWindow):
         self.current_path: str | None = None
         self._clipboard: dict | None = None   # copiar/pegar de nodos
 
+        # historial deshacer/rehacer (snapshots del ensamblaje activo)
+        self._undo: list[dict] = []
+        self._redo: list[dict] = []
+        self._last_snapshot: dict = self.harness.to_dict()
+        self._restoring = False
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.timeout.connect(self._commit_snapshot)
+
         # estado del marco de hoja (plantilla en el lienzo)
         self.page_name = "A4"
         self.landscape = False
@@ -318,6 +326,62 @@ class MainWindow(QMainWindow):
         self.scene = HarnessScene(self.harness)
         self.scene.changed_model.connect(self.refresh_reports)
         self.scene.selection_info.connect(self.show_properties)
+        self.scene.changed_model.connect(self._schedule_snapshot)
+        self.scene.dirtied.connect(self._schedule_snapshot)
+
+    # ----- deshacer / rehacer ----------------------------------------
+    def _schedule_snapshot(self) -> None:
+        if not self._restoring:
+            self._snap_timer.start(350)
+
+    def _commit_snapshot(self) -> None:
+        if self._restoring:
+            return
+        state = self.harness.to_dict()
+        if state != self._last_snapshot:
+            self._undo.append(self._last_snapshot)
+            if len(self._undo) > 100:
+                self._undo.pop(0)
+            self._last_snapshot = state
+            self._redo.clear()
+
+    def _reset_history(self) -> None:
+        self._snap_timer.stop()
+        self._undo.clear()
+        self._redo.clear()
+        self._last_snapshot = self.harness.to_dict()
+
+    def _restore_state(self, state: dict) -> None:
+        self._restoring = True
+        try:
+            restored = Harness.from_dict(state)
+            restored.filename = self.harness.filename
+            self.project.assemblies[self._active] = restored
+            self.harness = restored
+            self._reload_scene()
+        finally:
+            self._restoring = False
+        self.refresh_reports()
+
+    def undo(self) -> None:
+        self._snap_timer.stop()
+        self._commit_snapshot()
+        if not self._undo:
+            self.statusBar().showMessage("Nada que deshacer", 2000)
+            return
+        self._redo.append(self._last_snapshot)
+        self._last_snapshot = self._undo.pop()
+        self._restore_state(self._last_snapshot)
+        self.statusBar().showMessage("Deshecho", 1500)
+
+    def redo(self) -> None:
+        if not self._redo:
+            self.statusBar().showMessage("Nada que rehacer", 2000)
+            return
+        self._undo.append(self._last_snapshot)
+        self._last_snapshot = self._redo.pop()
+        self._restore_state(self._last_snapshot)
+        self.statusBar().showMessage("Rehecho", 1500)
 
     # ----- docks ------------------------------------------------------
     def _build_project_dock(self) -> None:
@@ -555,13 +619,26 @@ class MainWindow(QMainWindow):
     # ----- toolbar / menu --------------------------------------------
     def _build_toolbar(self) -> None:
         tb = QToolBar("Acciones")
-        # botón de guardar (el atajo Ctrl+S lo aporta la acción del menú)
-        a_save = QAction("💾 Guardar", self)
-        a_save.triggered.connect(self.save_file)
-        tb.addAction(a_save)
-        a_save_asm = QAction("Guardar ensamblaje", self)
-        a_save_asm.triggered.connect(self.save_current_assembly)
-        tb.addAction(a_save_asm)
+        tb.setIconSize(QSize(22, 22))
+        # acciones principales con icono (estilo KiCad). Se irán agregando más
+        # iconos conforme avance el proyecto.
+        self._tb_action(tb, icons.new_icon(), "Nuevo", self.new_file,
+                        "Nuevo proyecto")
+        self._tb_action(tb, icons.open_icon(), "Abrir", self.open_file,
+                        "Abrir proyecto / arnés")
+        self._tb_action(tb, icons.save_icon(), "Guardar", self.save_file,
+                        "Guardar proyecto (Ctrl+S)")
+        self._tb_action(tb, icons.pdf_icon(), "PDF", self.export_assembly_pdf,
+                        "Exportar ensamblaje a PDF")
+        tb.addSeparator()
+        self._tb_action(tb, icons.flip_h_icon(), "Voltear H",
+                        self.flip_selected_h,
+                        "Voltear selección izquierda↔derecha (tecla X)")
+        self._tb_action(tb, icons.flip_v_icon(), "Voltear V",
+                        self.flip_selected_v,
+                        "Voltear selección arriba↔abajo (tecla Y)")
+        self._tb_action(tb, icons.fit_icon(), "Encajar hoja", self.fit_page,
+                        "Encajar la hoja en la vista (Espacio)")
         tb.addSeparator()
         tb.addWidget(QLabel(" Hilo suelto — AWG: "))
         self.gauge_combo = QComboBox(); self.gauge_combo.addItems(AWG_SIZES)
@@ -577,69 +654,24 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.color_combo)
         self.addToolBar(tb)
 
+    def _tb_action(self, tb, icon, text, slot, tip):
+        a = QAction(icon, text, self)
+        a.setToolTip(tip)
+        a.triggered.connect(slot)
+        tb.addAction(a)
+        return a
+
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("&Archivo")
         self._act(m, "Nuevo proyecto", QKeySequence.New, self.new_file)
         self._act(m, "Abrir proyecto / arnés…", QKeySequence.Open, self.open_file)
         self._act(m, "Guardar proyecto", QKeySequence.Save, self.save_file)
         self._act(m, "Guardar proyecto como…", QKeySequence.SaveAs, self.save_file_as)
+        m.addSeparator()
         self._act(m, "Datos del proyecto (autor, versión, logo)…", None,
                   self.edit_project_info)
-        m.addSeparator()
-        ex = m.addMenu("Exportar CSV")
-        self._act(ex, "BOM…", None, lambda: self._export(reports.bom_to_csv, "bom"))
-        self._act(ex, "Tabla de corte…", None, lambda: self._export(reports.cut_list_to_csv, "cutlist"))
-        self._act(ex, "Netlist…", None, lambda: self._export(reports.netlist_to_csv, "netlist"))
-        pdf = m.addMenu("Exportar PDF (BOM + diagrama)")
-        self._act(pdf, "Proyecto completo…", None, self.export_project_pdf)
-        self._act(pdf, "Ensamblaje actual…", None, self.export_assembly_pdf)
-
-        en = self.menuBar().addMenu("&Ensamblaje")
-        self._act(en, "Nuevo ensamblaje", None, self.add_assembly)
-        self._act(en, "Renombrar ensamblaje…", None,
-                  lambda: self.rename_assembly(self._active))
-        self._act(en, "Duplicar ensamblaje", None,
-                  lambda: self.duplicate_assembly(self._active))
-        en.addSeparator()
-        self._act(en, "Guardar ensamblaje actual…", None,
-                  self.save_current_assembly)
-        self._act(en, "Añadir desde librería de ensamblajes…", None,
-                  self.add_assembly_from_library)
-        self._act(en, "Guardar ensamblaje en librería…", None,
-                  lambda: self.save_assembly_to_library(self._active))
-        en.addSeparator()
-        self._act(en, "Quitar ensamblaje del proyecto", None,
-                  lambda: self.remove_assembly(self._active))
-
-        e = self.menuBar().addMenu("&Edición")
-        # atajos acotados al lienzo para no pisar el copiar/pegar de los
-        # campos de texto del panel de propiedades
-        for text, seq, slot in (
-                ("Copiar", QKeySequence.Copy, self.copy_selection),
-                ("Cortar", QKeySequence.Cut, self.cut_selection),
-                ("Pegar", QKeySequence.Paste, self.paste_clipboard)):
-            a = QAction(text, self)
-            a.setShortcut(seq)
-            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-            a.triggered.connect(slot)
-            e.addAction(a)
-            self.view.addAction(a)
-        e.addSeparator()
-        self._act(e, "Borrar selección", QKeySequence.Delete, self.scene.delete_selected)
-        self._act(e, "Cancelar conexión (Esc)", None, self.scene.cancel_pending)
-
-        lib = self.menuBar().addMenu("&Librería")
-        self._act(lib, "Gestor de librerías…", None, self.manage_libraries)
-        lib.addSeparator()
-        self._act(lib, "Nueva librería…", None, self.new_library)
-        self._act(lib, "Importar librería (carpeta)…", None, self.import_library)
-        lib.addSeparator()
-        self._act(lib, "Nuevo componente…", None, self.open_component_editor)
-        self._act(lib, "Abrir carpeta de librerías…", None, self.reveal_libraries_root)
-
-        v = self.menuBar().addMenu("&Ver")
-
-        hoja = v.addMenu("Plantilla de hoja")
+        # configuración de hoja (documento/impresión)
+        hoja = m.addMenu("Configurar hoja")
         self._frame_act = QAction("Mostrar marco y cajetín", self, checkable=True)
         self._frame_act.setChecked(self.show_frame)
         self._frame_act.triggered.connect(self._toggle_frame)
@@ -661,7 +693,80 @@ class MainWindow(QMainWindow):
             a.setChecked(land == self.landscape)
             a.triggered.connect(lambda _=False, l=land: self._set_page_orient(l))
             self._page_orient_group.addAction(a); omenu.addAction(a)
+        m.addSeparator()
+        # exportar agrupado: PDF + CSV
+        ex = m.addMenu("Exportar")
+        pdf = ex.addMenu("PDF (BOM + diagrama)")
+        self._act(pdf, "Proyecto completo…", None, self.export_project_pdf)
+        self._act(pdf, "Ensamblaje actual… (imprimir)", QKeySequence.Print,
+                  self.export_assembly_pdf)
+        csv = ex.addMenu("CSV")
+        self._act(csv, "BOM compras (totales)…", None,
+                  lambda: self._export(reports.purchase_bom_to_csv, "bom_compras"))
+        self._act(csv, "BOM armado (qué va con qué)…", None,
+                  lambda: self._export(reports.bom_to_csv, "bom_armado"))
+        self._act(csv, "Tabla de corte…", None, lambda: self._export(reports.cut_list_to_csv, "cutlist"))
+        self._act(csv, "Netlist…", None, lambda: self._export(reports.netlist_to_csv, "netlist"))
 
+        e = self.menuBar().addMenu("&Edición")
+        self._act(e, "Deshacer", QKeySequence.Undo, self.undo)
+        a_redo = self._act(e, "Rehacer", QKeySequence.Redo, self.redo)
+        a_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        e.addSeparator()
+        # atajos acotados al lienzo para no pisar el copiar/pegar de los
+        # campos de texto del panel de propiedades
+        for text, seq, slot in (
+                ("Copiar", QKeySequence.Copy, self.copy_selection),
+                ("Cortar", QKeySequence.Cut, self.cut_selection),
+                ("Pegar", QKeySequence.Paste, self.paste_clipboard)):
+            a = QAction(text, self)
+            a.setShortcut(seq)
+            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            a.triggered.connect(slot)
+            e.addAction(a)
+            self.view.addAction(a)
+        e.addSeparator()
+        self._act(e, "Borrar selección", QKeySequence.Delete,
+                  lambda: self.scene.delete_selected())
+        e.addSeparator()
+        self._act(e, "Voltear horizontal (X)", None, self.flip_selected_h)
+        self._act(e, "Voltear vertical (Y)", None, self.flip_selected_v)
+        e.addSeparator()
+        self._act(e, "Cancelar conexión (Esc)", None,
+                  lambda: self.scene.cancel_pending())
+
+        en = self.menuBar().addMenu("&Ensamblaje")
+        self._act(en, "Nuevo ensamblaje", None, self.add_assembly)
+        self._act(en, "Renombrar ensamblaje…", None,
+                  lambda: self.rename_assembly(self._active))
+        self._act(en, "Duplicar ensamblaje", None,
+                  lambda: self.duplicate_assembly(self._active))
+        en.addSeparator()
+        self._act(en, "Guardar ensamblaje actual…", None,
+                  self.save_current_assembly)
+        self._act(en, "Añadir desde librería de ensamblajes…", None,
+                  self.add_assembly_from_library)
+        self._act(en, "Guardar ensamblaje en librería…", None,
+                  lambda: self.save_assembly_to_library(self._active))
+        en.addSeparator()
+        self._act(en, "Agregar cajetín de ensamblaje…", None,
+                  self.add_assembly_note)
+        en.addSeparator()
+        self._act(en, "Quitar ensamblaje del proyecto", None,
+                  lambda: self.remove_assembly(self._active))
+
+        lib = self.menuBar().addMenu("&Librería")
+        self._act(lib, "Gestor de librerías…", None, self.manage_libraries)
+        lib.addSeparator()
+        self._act(lib, "Nueva librería…", None, self.new_library)
+        self._act(lib, "Importar librería (carpeta)…", None, self.import_library)
+        self._act(lib, "Nuevo componente…", None, self.open_component_editor)
+        lib.addSeparator()
+        self._act(lib, "Abrir carpeta de librerías…", None, self.reveal_libraries_root)
+
+        v = self.menuBar().addMenu("&Ver")
+        self._act(v, "Encajar hoja en la vista (Espacio)", None, self.fit_page)
+        v.addSeparator()
         tema = v.addMenu("Tema")
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
@@ -672,7 +777,6 @@ class MainWindow(QMainWindow):
             self._theme_group.addAction(a)
             tema.addAction(a)
             self._theme_actions[name] = a
-
         v.addSeparator()
         self._act(v, "Configuración…", None, self.open_settings)
 
@@ -721,10 +825,22 @@ class MainWindow(QMainWindow):
     def _set_page_size(self, name: str) -> None:
         self.page_name = name
         self.scene.set_page(page_name=name)
+        self.view.request_fit()
 
     def _set_page_orient(self, landscape: bool) -> None:
         self.landscape = landscape
         self.scene.set_page(landscape=landscape)
+        self.view.request_fit()
+
+    # ----- voltear / encajar (toolbar) -------------------------------
+    def flip_selected_h(self) -> None:
+        self.scene.flip_selected("h")
+
+    def flip_selected_v(self) -> None:
+        self.scene.flip_selected("v")
+
+    def fit_page(self) -> None:
+        self.view.request_fit()
 
     # ----- configuración (escala de gráficos) ------------------------
     def open_settings(self) -> None:
@@ -765,6 +881,58 @@ class MainWindow(QMainWindow):
         comp = self.find_component(spec)
         if comp:
             self.scene.add_component(comp, pos)
+
+    # ----- cajetin de ensamblaje --------------------------------------
+    def add_assembly_note(self) -> None:
+        note = Note()
+        opts = reports.assembly_field_options(self.harness)
+        dlg = AssemblyBlockDialog(note, opts, self)
+        if not dlg.exec():
+            return
+        self._apply_note_cfg(note, dlg.result_note())
+        center = self.view.mapToScene(self.view.viewport().rect().center())
+        self.scene.add_note(note, center)
+        self.statusBar().showMessage(
+            "Cajetín agregado · arrástralo a su sitio · doble clic para editar", 5000)
+
+    def edit_note(self, note) -> None:
+        opts = reports.assembly_field_options(self.harness)
+        dlg = AssemblyBlockDialog(note, opts, self)
+        if not dlg.exec():
+            return
+        self._apply_note_cfg(note, dlg.result_note())
+        it = self.scene.note_item(note.id)
+        if it:
+            it.refresh()
+        self.scene.changed_model.emit()
+
+    def _apply_note_cfg(self, note, cfg: dict) -> None:
+        note.title = cfg["title"]
+        note.fields = cfg["fields"]
+        note.labels = cfg.get("labels", {})
+        note.comment = cfg["comment"]
+
+    # ----- editar el componente seleccionado (tecla E) ----------------
+    def edit_selected(self) -> None:
+        sel = self.scene.selectedItems()
+        if len(sel) != 1:
+            return
+        it = sel[0]
+        if isinstance(it, NoteItem):
+            self.edit_note(it.note)
+        elif isinstance(it, ConnectorItem):
+            self._edit_selected_part("connector", it.connector.part_number)
+        elif isinstance(it, CableItem):
+            self._edit_selected_part("cable", it.cable.part_number)
+
+    def _edit_selected_part(self, kind: str, pn: str) -> None:
+        lib, part = self._find_library_part(kind, pn)
+        if part:
+            self.edit_library_component(lib, part)
+        else:
+            QMessageBox.information(
+                self, "Sin librería",
+                f"«{pn}» no está en una librería cargada; no se puede editar.")
 
     # ----- librerias --------------------------------------------------
     def _load_all_libraries(self) -> None:
@@ -814,7 +982,7 @@ class MainWindow(QMainWindow):
         if not ok or not name.strip():
             return
         root = ensure_libraries_root()
-        from .library import _slug
+        from ..model.library import _slug
         path = os.path.join(root, _slug(name.strip()))
         os.makedirs(path, exist_ok=True)
         self.libraries.append(ComponentLibrary(path, name=name.strip()))
@@ -885,6 +1053,7 @@ class MainWindow(QMainWindow):
             inst.manufacturer = part.manufacturer
             inst.description = part.description
             inst.image = part.image_abs()
+            inst.params = dict(getattr(part, "params", {}))
             if is_conn:
                 inst.color = part.color
                 inst.terminal = part.terminal
@@ -983,7 +1152,7 @@ class MainWindow(QMainWindow):
     def delete_library(self, lib):
         if lib is None:
             return
-        from .library import LIBRARIES_ROOT
+        from ..model.library import LIBRARIES_ROOT
         root = os.path.abspath(LIBRARIES_ROOT)
         d = os.path.abspath(lib.directory)
         # solo librerías de usuario (dentro de librerias/); la estándar se protege
@@ -1035,6 +1204,8 @@ class MainWindow(QMainWindow):
             self._props_terminal(obj)
         elif isinstance(obj, Wire):
             self._props_wire(obj)
+        elif isinstance(obj, Note):
+            self._props_note(obj)
 
     def _terminal_options(self) -> list[str]:
         """PNs de terminales disponibles en todas las librerías cargadas."""
@@ -1255,6 +1426,17 @@ class MainWindow(QMainWindow):
         t.orientation = orientation
         self.scene.rebuild_node(t.id)
         self.refresh_reports()
+
+    def _props_note(self, n: Note):
+        self.props_layout.addWidget(QLabel(f"<b>Cajetín: {n.title}</b>"))
+        lbl = QLabel("Tabla terminal↔conector colocable en la hoja "
+                     "(se imprime con el diagrama).")
+        lbl.setStyleSheet("color:#90a4ae;"); lbl.setWordWrap(True)
+        self.props_layout.addWidget(lbl)
+        btn = QPushButton("Editar cajetín…")
+        btn.clicked.connect(lambda: self.edit_note(n))
+        self.props_layout.addWidget(btn)
+        self.props_layout.addStretch(1)
 
     def _props_wire(self, w: Wire):
         self.props_layout.addWidget(QLabel("<b>Hilo / conexión</b>"))
@@ -1612,7 +1794,9 @@ class MainWindow(QMainWindow):
                 "version": self.project.version, "logo": self.project.logo}
 
     def _do_pdf(self, harnesses, suggested_name):
-        opt = PdfExportDialog(self)
+        # el PDF hereda el tamaño/orientación de hoja configurados
+        opt = PdfExportDialog(self, page_name=self.page_name,
+                              landscape=self.landscape)
         if not opt.exec():
             return
         o = opt.result_options()
@@ -1646,5 +1830,10 @@ class MainWindow(QMainWindow):
         self.scene.default_color = self.color_combo.currentText()
         self.view.setScene(self.scene)
         self._apply_page_to_scene()
+        self.view.request_fit()
         self.show_properties(None)
         self.refresh_reports()
+        # al cambiar de ensamblaje/proyecto se empieza un historial nuevo; durante
+        # un deshacer/rehacer NO se resetea (se está restaurando un estado).
+        if not self._restoring:
+            self._reset_history()

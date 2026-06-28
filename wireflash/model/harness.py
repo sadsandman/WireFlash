@@ -80,6 +80,7 @@ class Connector:
     terminal: str = ""                   # PN del terminal/contacto por defecto
     terminal_desc: str = ""              # descripcion (p.ej. "tubular size 16", "herradura")
     pins: list[Pin] = field(default_factory=list)
+    params: dict = field(default_factory=dict)   # parámetros personalizados
     id: str = field(default_factory=_new_id)
 
     def pin_by_id(self, pin_id: str) -> Optional[Pin]:
@@ -132,6 +133,7 @@ class Cable:
     x: float = 0.0
     y: float = 0.0
     image: str = ""
+    params: dict = field(default_factory=dict)   # parámetros personalizados
     id: str = field(default_factory=_new_id)
 
     @property
@@ -180,6 +182,46 @@ class Terminal:
     @classmethod
     def from_dict(cls, d: dict) -> "Terminal":
         return cls(**_filter(cls, d))
+
+
+# ===================================================================
+#  Cajetin de ensamblaje (anotacion colocable en la hoja)
+# ===================================================================
+# Columnas opcionales "de fábrica" del cajetin: (clave, etiqueta por defecto).
+# Además se pueden elegir parámetros personalizados de los componentes. La
+# columna "Ítem" (conector / terminal indentado / cable) va siempre primero.
+ASSEMBLY_FIELDS = [
+    ("sku", "SKU"),
+    ("pn", "PN"),
+    ("desc", "Descripción"),
+    ("cant", "Cant."),
+]
+DEFAULT_NOTE_FIELDS = ["pn", "cant"]
+
+
+@dataclass
+class Note:
+    """Cajetin colocable en la hoja con el detalle terminal<->conector. Las
+    columnas son seleccionables (campos de fábrica + parámetros personalizados),
+    sus etiquetas son renombrables (``labels``) y admite un comentario libre."""
+
+    title: str = "Ensamblaje"
+    fields: list = field(default_factory=lambda: list(DEFAULT_NOTE_FIELDS))
+    labels: dict = field(default_factory=dict)   # clave_campo -> etiqueta personalizada
+    comment: str = ""
+    x: float = 0.0
+    y: float = 0.0
+    id: str = field(default_factory=_new_id)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Note":
+        d = _filter(cls, d)
+        if "fields" in d and not isinstance(d["fields"], list):
+            d.pop("fields")
+        return cls(**d)
 
 
 # ===================================================================
@@ -276,7 +318,19 @@ class Harness:
         self.cables: list[Cable] = []
         self.terminals: list[Terminal] = []
         self.wires: list[Wire] = []
+        self.notes: list[Note] = []        # cajetines de ensamblaje en la hoja
         self.filename: str | None = None   # nombre de archivo propio (.rhasm), no serializado
+
+    # ----- cajetines / notas -----------------------------------------
+    def add_note(self, note: "Note") -> "Note":
+        self.notes.append(note)
+        return note
+
+    def note(self, nid: str) -> "Note | None":
+        return next((n for n in self.notes if n.id == nid), None)
+
+    def remove_note(self, nid: str) -> None:
+        self.notes = [n for n in self.notes if n.id != nid]
 
     # ----- conectores -------------------------------------------------
     def next_ref(self) -> str:
@@ -426,6 +480,7 @@ class Harness:
             "cables": [c.to_dict() for c in self.cables],
             "terminals": [t.to_dict() for t in self.terminals],
             "wires": [w.to_dict() for w in self.wires],
+            "notes": [n.to_dict() for n in self.notes],
         }
 
     @classmethod
@@ -435,6 +490,7 @@ class Harness:
         h.cables = [Cable.from_dict(c) for c in d.get("cables", [])]
         h.terminals = [Terminal.from_dict(t) for t in d.get("terminals", [])]
         h.wires = [Wire.from_dict(w) for w in d.get("wires", [])]
+        h.notes = [Note.from_dict(n) for n in d.get("notes", [])]
         return h
 
     def save(self, path: str) -> None:

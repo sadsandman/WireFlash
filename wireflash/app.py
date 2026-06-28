@@ -6,8 +6,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from .mainwindow import MainWindow
-from .theme import THEMES, saved_theme
+from .controller.mainwindow import MainWindow
+from .view.theme import THEMES, saved_theme
 
 
 def main() -> int:

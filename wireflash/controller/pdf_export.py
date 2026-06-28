@@ -22,17 +22,17 @@ from PySide6.QtGui import (
     QTextDocument,
 )
 
-from . import reports
-from .scene import HarnessScene
-from .templates import PAGE_SIZES, FrameTemplate
+from ..model import reports
+from ..view import items
+from ..view.scene import HarnessScene
+from ..model.templates import PAGE_SIZES, FrameTemplate
 
 def _mm(v: float, dpi: float) -> float:
     return v / 25.4 * dpi
 
 
 # ---- BOM como documento paginable --------------------------------------
-def _bom_html(h) -> str:
-    rows = reports.bill_of_materials(h)
+def _bom_html(rows) -> str:
     body = []
     for r in rows:
         ind = "&nbsp;&nbsp;&nbsp;&nbsp;" if r.level == 1 else ""
@@ -52,13 +52,13 @@ def _bom_html(h) -> str:
             f"{head}{''.join(body)}</table>")
 
 
-def _bom_doc(h, content: QRectF) -> QTextDocument:
+def _bom_doc(h, content: QRectF, rows, title: str) -> QTextDocument:
     doc = QTextDocument()
     doc.setDefaultFont(QFont("Helvetica", 9))
     doc.setPageSize(QSizeF(content.width(), content.height()))
     doc.setHtml(
         f"<h2>{html.escape(h.name)}</h2>"
-        f"<h3>Lista de materiales (BOM)</h3>{_bom_html(h)}")
+        f"<h3>{html.escape(title)}</h3>{_bom_html(rows)}")
     return doc
 
 
@@ -110,7 +110,12 @@ def _draw_diagram(painter, h, content: QRectF, dpi: float,
     ip.setRenderHint(QPainter.Antialiasing)
     ip.setRenderHint(QPainter.TextAntialiasing)
     ip.setRenderHint(QPainter.SmoothPixmapTransform)
-    s.render(ip, QRectF(0, 0, w, hpx), src)
+    # modo impresion: componentes con fondo claro y texto oscuro (legible en papel)
+    items.set_print_mode(True)
+    try:
+        s.render(ip, QRectF(0, 0, w, hpx), src)
+    finally:
+        items.set_print_mode(False)
     ip.end()
 
     target = QRectF(area.x() + (area.width() - w) / 2, area.y(), w, hpx)
@@ -139,11 +144,16 @@ def export_pdf(assemblies, path: str, fields_base: dict, *,
     base.setdefault("date", date.today().isoformat())
 
     # descriptores de página: (nombre_ensamblaje, doc|None, idx_pag, harness|None)
+    #   1) BOM de compras (totales sumados) · 2) BOM de armado (qué va con qué,
+    #   terminales bajo su conector) · 3) diagrama.
     descriptors: list[tuple] = []
     for h in assemblies:
-        doc = _bom_doc(h, content)
-        for pi in range(max(1, doc.pageCount())):
-            descriptors.append((h.name, doc, pi, None))
+        compras = _bom_doc(h, content, reports.purchase_bom(h),
+                           "Lista de materiales — Compras (totales)")
+        for pi in range(max(1, compras.pageCount())):
+            descriptors.append((h.name, compras, pi, None))
+        # el detalle "qué va con qué" (terminal↔conector) NO va como hoja
+        # aparte: se coloca como cajetín en la hoja del diagrama (ver NoteItem).
         descriptors.append((h.name, None, 0, h))
     total = len(descriptors)
 

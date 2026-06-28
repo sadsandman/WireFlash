@@ -1,5 +1,6 @@
 # Empaquetado
 /build/
+/build-win/
 /dist/
 *.AppImage
 appimagetool-*.AppImage

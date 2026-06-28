@@ -7,8 +7,13 @@
   "category": "Automotive sealed",
   "color": "#455a64",
   "image": "images/2026-06-22_21-22-be42ec.png",
+  "terminal": "sad",
+  "terminal_desc": "sad",
   "pins": [
     "1",
     "2"
+  ],
+  "compatible_terminals": [
+    "Molex 0039000038"
   ]
 }

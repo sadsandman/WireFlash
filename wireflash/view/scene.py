@@ -6,10 +6,11 @@ from PySide6.QtCore import QPointF, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsScene
 
-from .items import CableItem, ConnectorItem, PortItem, TerminalItem, WireItem
-from .library import CablePart, Part, TerminalPart
-from .model import Cable, Endpoint, Harness, Terminal, Wire
-from .templates import FrameTemplate, page_size_mm
+from .items import (
+    CableItem, ConnectorItem, NoteItem, PortItem, TerminalItem, WireItem)
+from ..model.library import CablePart, Part, TerminalPart
+from ..model import Cable, Endpoint, Harness, Terminal, Wire
+from ..model.templates import FrameTemplate, page_size_mm
 
 # escala del lienzo: 96 ppp -> 1 mm = 3.7795 unidades de escena
 PX_PER_MM = 96.0 / 25.4
@@ -18,11 +19,11 @@ PX_PER_MM = 96.0 / 25.4
 class HarnessScene(QGraphicsScene):
     changed_model = Signal()
     selection_info = Signal(object)
+    dirtied = Signal()              # cualquier cambio (incluye mover nodos) -> undo
 
     def __init__(self, harness: Harness) -> None:
         super().__init__()
         self.harness = harness
-        self.setSceneRect(-300, -300, 3000, 2200)
         self.bg_color = QColor("#0f1419")
         self.grid_color = QColor("#1b2630")
         self.setBackgroundBrush(self.bg_color)
@@ -39,7 +40,43 @@ class HarnessScene(QGraphicsScene):
         self.default_gauge = "20"
         self.default_color = "BK"
         self.selectionChanged.connect(self._on_selection)
+        self._update_scene_rect()
         self.rebuild()
+
+    # ----- area de trabajo --------------------------------------------
+    def _update_scene_rect(self) -> None:
+        """Ajusta el sceneRect para que siempre contenga la hoja con margen."""
+        page = self.page_rect()
+        margin = 300.0
+        rect = page.adjusted(-margin, -margin, margin, margin)
+        # asegurar un area minima de trabajo aunque la hoja sea pequena
+        rect = rect.united(QRectF(-300, -300, 3000, 2200))
+        self.setSceneRect(rect)
+
+    # ----- voltear (mirror) ------------------------------------------
+    def flip_selected(self, axis: str) -> None:
+        """Orienta/voltea los nodos seleccionados cambiando su lado de salida.
+        'h' (tecla X) = salida horizontal: alterna izquierda<->derecha, y si el
+        conector mira arriba/abajo lo pasa a horizontal. 'v' (tecla Y) = salida
+        vertical: alterna arriba<->abajo, y si mira izquierda/derecha lo pasa a
+        vertical. Asi X e Y siempre hacen algo sea cual sea el lado actual."""
+        if axis == "h":
+            nxt = {"right": "left", "left": "right",
+                   "top": "left", "bottom": "right"}
+        else:
+            nxt = {"top": "bottom", "bottom": "top",
+                   "left": "top", "right": "bottom"}
+        changed = False
+        for it in self.selectedItems():
+            model = getattr(it, "model", None)
+            side = getattr(model, "side", None)
+            if side in nxt:
+                model.side = nxt[side]
+                if hasattr(it, "relayout"):
+                    it.relayout()
+                changed = True
+        if changed:
+            self.changed_model.emit()
 
     # ----- construccion ----------------------------------------------
     def rebuild(self) -> None:
@@ -53,6 +90,8 @@ class HarnessScene(QGraphicsScene):
             self._add_node_item(CableItem(c))
         for t in self.harness.terminals:
             self._add_node_item(TerminalItem(t))
+        for n in self.harness.notes:
+            self._add_node_item(NoteItem(n))
         for w in self.harness.wires:
             self._add_wire_item(w)
         self._refresh_ports()
@@ -94,6 +133,17 @@ class HarnessScene(QGraphicsScene):
             self.harness.add_terminal(term)
             self._add_node_item(TerminalItem(term))
         self.changed_model.emit()
+
+    def add_note(self, note, pos: QPointF) -> None:
+        note.x = round(pos.x() / 10) * 10
+        note.y = round(pos.y() / 10) * 10
+        self.harness.add_note(note)
+        self._add_node_item(NoteItem(note))
+        self.changed_model.emit()
+
+    def note_item(self, note_id: str):
+        it = self._node_items.get(note_id)
+        return it if isinstance(it, NoteItem) else None
 
     # ----- creacion de segmentos -------------------------------------
     def port_clicked(self, port: PortItem) -> None:
@@ -164,6 +214,11 @@ class HarnessScene(QGraphicsScene):
                 self._wire_items.pop(it.wire.id, None)
                 self.removeItem(it)
                 removed = True
+            elif isinstance(it, NoteItem):
+                self.harness.remove_note(it.node_id)
+                self._node_items.pop(it.node_id, None)
+                self.removeItem(it)
+                removed = True
             elif isinstance(it, (ConnectorItem, CableItem, TerminalItem)):
                 nid = it.node_id
                 for w in self.harness.wires_on_node(nid):
@@ -200,6 +255,9 @@ class HarnessScene(QGraphicsScene):
             if isinstance(it, WireItem):
                 self.selection_info.emit(it.wire)
                 return
+            if isinstance(it, NoteItem):
+                self.selection_info.emit(it.note)
+                return
         self.selection_info.emit(None)
 
     # ----- tema -------------------------------------------------------
@@ -223,6 +281,7 @@ class HarnessScene(QGraphicsScene):
             self.landscape = landscape
         if show is not None:
             self.show_frame = show
+        self._update_scene_rect()
         self.update()
 
     def drawForeground(self, painter: QPainter, rect) -> None:

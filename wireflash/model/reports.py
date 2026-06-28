@@ -10,7 +10,7 @@ import io
 from collections import defaultdict
 from dataclasses import dataclass
 
-from .model import Harness
+from .harness import Harness
 
 
 @dataclass
@@ -54,6 +54,13 @@ def bill_of_materials(h: Harness) -> list[BomRow]:
         rows.append(BomRow("Terminal", sku, pn,
                            term_item_desc.get((sku, pn), ""), qty, "ud", level=0))
 
+    rows += _cable_wire_rows(h)
+    return rows
+
+
+def _cable_wire_rows(h: Harness) -> list[BomRow]:
+    """Filas de cables fisicos, cortes y hilos sueltos (comunes a ambos BOM)."""
+    rows: list[BomRow] = []
     # cables fisicos por (sku, part_number)
     cab_qty: dict[tuple, int] = defaultdict(int)
     cab_len: dict[tuple, float] = defaultdict(float)
@@ -116,6 +123,96 @@ def bill_of_materials(h: Harness) -> list[BomRow]:
     return rows
 
 
+def purchase_bom(h: Harness) -> list[BomRow]:
+    """BOM de **compras**: cantidades totales por part number, sin desglose por
+    conector (los conectores iguales se suman y los terminales se totalizan)."""
+    rows: list[BomRow] = []
+
+    # conectores sumados por (sku, PN)
+    conn_qty: dict[tuple, int] = defaultdict(int)
+    conn_desc: dict[tuple, str] = {}
+    for c in h.connectors:
+        key = (c.sku, c.part_number or "(sin PN)")
+        conn_qty[key] += 1
+        conn_desc[key] = " · ".join(x for x in (c.manufacturer, c.description) if x)
+    for (sku, pn), qty in sorted(conn_qty.items()):
+        rows.append(BomRow("Conector", sku, pn, conn_desc[(sku, pn)], qty, "ud"))
+
+    # terminales totalizados por PN (de los pines de los conectores + sueltos)
+    term_qty: dict[str, int] = defaultdict(int)
+    term_sku: dict[str, str] = {}
+    term_desc: dict[str, str] = {}
+    for c in h.connectors:
+        for p in c.pins:
+            term = c.pin_terminal(p)
+            if not term:
+                continue
+            term_qty[term] += 1
+            if not p.terminal.strip() and term not in term_desc:
+                term_desc[term] = c.terminal_desc
+    for t in h.terminals:
+        pn = t.part_number or "(terminal sin PN)"
+        term_qty[pn] += 1
+        if t.sku:
+            term_sku[pn] = t.sku
+        if pn not in term_desc:
+            term_desc[pn] = f"{t.manufacturer} {t.description}".strip()
+    for pn, qty in sorted(term_qty.items()):
+        rows.append(BomRow("Terminal", term_sku.get(pn, ""), pn,
+                           term_desc.get(pn, ""), qty, "ud"))
+
+    rows += _cable_wire_rows(h)
+    return rows
+
+
+def assembly_block_rows(h: Harness) -> list[dict]:
+    """Filas estructuradas para el cajetín de ensamblaje: cada conector con sus
+    terminales indentados debajo, y luego los cables del ensamblaje. Cada fila
+    lleva item, sku, pn, desc, cant, level (0=conector/cable, 1=terminal) y los
+    parámetros personalizados del componente aplanados (clave->valor)."""
+    out: list[dict] = []
+    for c in sorted(h.connectors, key=lambda x: x.ref):
+        row = {"item": c.ref, "sku": c.sku, "pn": c.part_number or "",
+               "desc": c.description or "", "cant": "", "level": 0}
+        row.update(getattr(c, "params", {}) or {})
+        out.append(row)
+        tq: dict[str, int] = defaultdict(int)
+        td: dict[str, str] = {}
+        for p in c.pins:
+            term = c.pin_terminal(p)
+            if not term:
+                continue
+            tq[term] += 1
+            if term not in td:
+                td[term] = c.terminal_desc if not p.terminal.strip() else ""
+        for term, qty in sorted(tq.items()):
+            out.append({"item": f"↳ {term}", "sku": "", "pn": "",
+                        "desc": td.get(term, ""), "cant": qty, "level": 1})
+    for cab in sorted(h.cables, key=lambda x: x.ref):
+        length = f"{cab.length_mm / 1000:.2f} m" if cab.length_mm else ""
+        row = {"item": cab.ref, "sku": cab.sku, "pn": cab.part_number or "",
+               "desc": cab.type_label(), "cant": length, "level": 0}
+        row.update(getattr(cab, "params", {}) or {})
+        out.append(row)
+    return out
+
+
+def assembly_field_options(h: Harness) -> list[tuple]:
+    """Campos disponibles para el cajetín: los de fábrica + los parámetros
+    personalizados presentes en conectores/cables del ensamblaje."""
+    from .harness import ASSEMBLY_FIELDS
+    opts = list(ASSEMBLY_FIELDS)
+    known = {k for k, _ in opts}
+    extra: list[str] = []
+    for comp in list(h.connectors) + list(h.cables):
+        for key in (getattr(comp, "params", {}) or {}):
+            if key not in known:
+                known.add(key)
+                extra.append(key)
+    opts += [(k, k) for k in sorted(extra)]
+    return opts
+
+
 @dataclass
 class CutRow:
     cable: str
@@ -172,7 +269,7 @@ def netlist(h: Harness) -> list[tuple[str, list[str]]]:
 
     out: list[tuple[str, list[str]]] = []
     for i, net in enumerate(h.nets(), start=1):
-        from .model import Endpoint
+        from .harness import Endpoint
         labels = sorted(h.endpoint_label(Endpoint(*k)) for k in net)
         name = next((pin_name[k] for k in net if k in pin_name), f"NET{i}")
         out.append((name, labels))
@@ -187,6 +284,15 @@ def bom_to_csv(h: Harness) -> str:
     w = csv.writer(buf)
     w.writerow(["Categoria", "SKU", "Item", "Descripcion", "Cantidad", "Unidad"])
     for r in bill_of_materials(h):
+        w.writerow([r.category, r.sku, r.item, r.description, r.qty, r.unit])
+    return buf.getvalue()
+
+
+def purchase_bom_to_csv(h: Harness) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Categoria", "SKU", "PartNumber", "Descripcion", "Cantidad", "Unidad"])
+    for r in purchase_bom(h):
         w.writerow([r.category, r.sku, r.item, r.description, r.qty, r.unit])
     return buf.getvalue()
 

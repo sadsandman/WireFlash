@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QFontMetrics, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
@@ -18,7 +19,10 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
 )
 
-from .model import Cable, Connector, Endpoint, Terminal, Wire, WIRE_COLORS
+from ..model import (
+    ASSEMBLY_FIELDS, Cable, Connector, Endpoint, Note, Terminal, Wire,
+    WIRE_COLORS)
+from ..model import reports
 
 # escala global de los items gráficos (conectores, cables, terminales, puertos).
 # 1.0 = tamaño base; se ajusta desde Configuración y se aplica por nodo con
@@ -32,11 +36,56 @@ def set_graphics_scale(s: float) -> None:
     GRAPHICS_SCALE = max(0.1, float(s))
 
 
+# Modo impresion: cuando esta activo, los componentes se pintan con fondo claro
+# y texto oscuro (legible en papel). En pantalla se mantiene el tema oscuro.
+# El exportador a PDF lo enciende mientras rasteriza el diagrama.
+PRINT_MODE = False
+
+
+def set_print_mode(on: bool) -> None:
+    global PRINT_MODE
+    PRINT_MODE = bool(on)
+
+
+def _ink(screen, paper):
+    """Devuelve el color de pantalla o el de impresion segun PRINT_MODE."""
+    return QColor(paper if PRINT_MODE else screen)
+
+
+def _print_tint(c):
+    """Version pálida (clara) de un color, conservando el matiz. Se usa para el
+    fondo del encabezado en impresion, para que tambien sea claro."""
+    c = QColor(c)
+    return QColor(round(c.red() * 0.16 + 255 * 0.84),
+                  round(c.green() * 0.16 + 255 * 0.84),
+                  round(c.blue() * 0.16 + 255 * 0.84))
+
+
+def _text_w(text, bold=False, size=8) -> float:
+    """Ancho en px de un texto con la fuente indicada (para dimensionar cajas).
+    Incluye una pequeña holgura porque el ancho real al pintar suele superar
+    levemente al que reporta QFontMetrics."""
+    if not text:
+        return 0.0
+    f = QFont(); f.setBold(bold); f.setPointSize(size)
+    return QFontMetrics(f).horizontalAdvance(str(text)) * 1.15
+
+
+def _header_width(ref, line2, subtitle="", subtitle2="") -> float:
+    """Ancho minimo para que el encabezado no se solape: en cada linea caben el
+    texto de la izquierda y el de la derecha sin pisarse."""
+    gap = 10
+    l1 = _text_w(ref, True, 9) + (_text_w(subtitle, False, 7) + gap if subtitle else 0)
+    l2 = _text_w(line2, False, 7) + (_text_w(subtitle2, False, 7) + gap if subtitle2 else 0)
+    return max(l1, l2) + 12   # margenes laterales (6 + 6)
+
+
 BOX_WIDTH = 140
 HEADER_H = 30
 IMAGE_BAND = 72          # alto de la banda de imagen (entre el nombre y los pines)
 PIN_H = 22
 PIN_NUB_R = 5
+GRID = 10                # rejilla de posicion en X (unidades de escena)
 
 # Terminal item constants
 TERM_H_W = 190    # ancho en orientacion horizontal
@@ -145,6 +194,7 @@ class PortItem(QGraphicsEllipseItem):
 class _NodeMixin:
     def _init_node(self, model):
         self.model = model
+        self._w = None              # ancho de caja calculado (cache, ver body_width)
         self.setPos(model.x, model.y)
         self.setScale(GRAPHICS_SCALE)
         self.setFlags(QGraphicsItem.ItemIsMovable
@@ -156,15 +206,35 @@ class _NodeMixin:
     def node_id(self) -> str:
         return self.model.id
 
+    def _first_port_offset(self):
+        """Y (sin escalar) del primer puerto respecto al origen del nodo.
+        None = el nodo no usa rejilla de filas (se snapea a GRID normal)."""
+        return None
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange and self.scene():
-            value = QPointF(round(value.x() / 10) * 10, round(value.y() / 10) * 10)
-            return value
+            x = round(value.x() / GRID) * GRID
+            off = self._first_port_offset()
+            if off is None:
+                y = round(value.y() / GRID) * GRID
+            else:
+                # Snap del primer puerto a una rejilla de filas (= alto de fila
+                # escalado). Como las filas estan espaciadas ese mismo alto,
+                # TODOS los puertos del nodo caen en la misma rejilla Y; asi un
+                # cable entre dos pines alineados sale perfectamente recto, pese
+                # a que los conectores tengan distinta cabecera/imagen.
+                row_h = max(1.0, self.scale() * PIN_H)
+                off *= self.scale()
+                y = round((value.y() + off) / row_h) * row_h - off
+            return QPointF(x, y)
         if change == QGraphicsItem.ItemPositionHasChanged:
             self.model.x = self.pos().x()
             self.model.y = self.pos().y()
-            if hasattr(self.scene(), "update_wires_for"):
-                self.scene().update_wires_for(self.node_id)
+            sc = self.scene()
+            if sc is not None and hasattr(sc, "update_wires_for"):
+                sc.update_wires_for(self.node_id)
+            if sc is not None and hasattr(sc, "dirtied"):
+                sc.dirtied.emit()      # registra el movimiento para deshacer
         return super().itemChange(change, value)
 
 
@@ -190,17 +260,35 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
     def content_top(self):
         return HEADER_H + _band_h(_pixmap(self.connector.image))
 
+    def _first_port_offset(self):
+        return self.content_top() + PIN_H / 2
+
+    def body_width(self):
+        """Ancho de la caja segun su contenido (encabezado y nombres de pin),
+        nunca menor que BOX_WIDTH. Se cachea (el item se recrea al editar)."""
+        if self._w is None:
+            c = self.connector
+            line2 = " · ".join(x for x in (c.sku, c.part_number) if x)
+            w = _header_width(c.ref, line2)
+            for pin in c.pins:
+                # numero (col izq, ~34) + nombre + holgura del circulo de contacto
+                # (~16 a la derecha); en negrita por si imprime.
+                w = max(w, 50 + _text_w(pin.name, True, 8))
+            self._w = max(BOX_WIDTH, w)
+        return self._w
+
     def _place_ports(self):
         side = self.connector.side
         total = max(1, len(self.connector.pins))
         h = self.body_height()
         top = self.content_top()
+        w = self.body_width()
         for row, port in enumerate(self.ports):
             if side in ("right", "left"):
-                x = BOX_WIDTH if side == "right" else 0.0
+                x = w if side == "right" else 0.0
                 y = top + row * PIN_H + PIN_H / 2
             else:
-                x = (row + 0.5) / total * BOX_WIDTH
+                x = (row + 0.5) / total * w
                 y = 0.0 if side == "top" else h
             port.setPos(x, y)
 
@@ -216,27 +304,29 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
 
     def boundingRect(self):
         m = PIN_NUB_R + 2
-        return QRectF(-m, -m, BOX_WIDTH + 2 * m, self.body_height() + 2 * m)
+        return QRectF(-m, -m, self.body_width() + 2 * m, self.body_height() + 2 * m)
 
     def port_for(self, port_id: str):
         return next((p for p in self.ports if p.endpoint.port == port_id), None)
 
     def paint(self, p, option, widget=None):
         c = self.connector
-        body = QRectF(0, 0, BOX_WIDTH, self.body_height())
+        w = self.body_width()
+        body = QRectF(0, 0, w, self.body_height())
         base = QColor(c.color)
-        p.setPen(QPen(QColor("#0d1b22"), 1.5))
-        p.setBrush(QBrush(base.darker(115)))
+        p.setPen(QPen(_ink("#0d1b22", "#37474f"), 1.5))
+        p.setBrush(QBrush(QColor("#ffffff") if PRINT_MODE else base.darker(115)))
         p.drawRoundedRect(body, 6, 6)
 
         pm = _pixmap(c.image)
         if pm:
-            _draw_image_band(p, pm, QRectF(1, HEADER_H, BOX_WIDTH - 2, IMAGE_BAND))
+            _draw_image_band(p, pm, QRectF(1, HEADER_H, w - 2, IMAGE_BAND))
 
-        _paint_header(p, base, c.ref, c.part_number, c.sku)
+        _paint_header(p, base, c.ref, c.part_number, c.sku, width=w)
 
         top = self.content_top()
-        f = QFont(); f.setPointSize(8); p.setFont(f)
+        # en impresion el texto va en negrita para que se lea/imprima mejor
+        f = QFont(); f.setPointSize(8); f.setBold(PRINT_MODE); p.setFont(f)
         left_side = c.side == "left"
         for row, pin in enumerate(c.pins):
             y = top + row * PIN_H
@@ -244,25 +334,27 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
             # terminal elegido en ESTE pin (no heredado del conector)
             explicit = pin.terminal.strip() not in ("", "-")
             if row % 2:
-                p.fillRect(QRectF(1, y, BOX_WIDTH - 2, PIN_H),
-                           QColor(255, 255, 255, 14))
+                p.fillRect(QRectF(1, y, w - 2, PIN_H),
+                           QColor(0, 0, 0, 12) if PRINT_MODE
+                           else QColor(255, 255, 255, 14))
             if not has_term:
                 # cavidad vacía: fondo levemente oscurecido
-                p.fillRect(QRectF(1, y, BOX_WIDTH - 2, PIN_H), QColor(0, 0, 0, 30))
+                p.fillRect(QRectF(1, y, w - 2, PIN_H),
+                           QColor(0, 0, 0, 16) if PRINT_MODE else QColor(0, 0, 0, 30))
             elif explicit:
                 # terminal asignado a propósito en este pin: banda dorada tenue
-                p.fillRect(QRectF(1, y, BOX_WIDTH - 2, PIN_H),
+                p.fillRect(QRectF(1, y, w - 2, PIN_H),
                            QColor(200, 169, 96, 38))
             num_rect = QRectF(8, y, 26, PIN_H)
-            name_rect = QRectF(34, y, BOX_WIDTH - 40, PIN_H)
+            name_rect = QRectF(34, y, w - 40, PIN_H)
             na, ma = Qt.AlignLeft, Qt.AlignLeft
             if left_side:
-                num_rect = QRectF(BOX_WIDTH - 34, y, 26, PIN_H)
-                name_rect = QRectF(6, y, BOX_WIDTH - 40, PIN_H)
+                num_rect = QRectF(w - 34, y, 26, PIN_H)
+                name_rect = QRectF(6, y, w - 40, PIN_H)
                 na = ma = Qt.AlignRight
             if c.side in ("right", "left"):
                 cir_sz = 8
-                cir_x = (BOX_WIDTH - 5 - cir_sz) if not left_side else 5
+                cir_x = (w - 5 - cir_sz) if not left_side else 5
                 cir_y = y + (PIN_H - cir_sz) / 2
                 if has_term:
                     # contacto presente: círculo sólido metálico.
@@ -282,10 +374,13 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
                     p.setBrush(Qt.NoBrush)
                     p.setPen(QPen(QColor("#455a64"), 1.0, Qt.DashLine))
                     p.drawEllipse(QRectF(cir_x, cir_y, cir_sz, cir_sz))
-            p.setPen(QColor("#eceff1" if has_term else "#546e7a"))
+            # numero: en papel SIEMPRE oscuro (consistente entre conectores;
+            # la presencia de terminal ya la indica el circulo solido/punteado).
+            p.setPen(_ink("#eceff1" if has_term else "#546e7a", "#1b2730"))
             p.drawText(num_rect, Qt.AlignVCenter | na, pin.number)
             if pin.name:
-                p.setPen(QColor("#80deea" if has_term else "#455a64"))
+                p.setPen(_ink("#80deea" if has_term else "#455a64",
+                              "#00695c" if has_term else "#5a6b73"))
                 p.drawText(name_rect, Qt.AlignVCenter | ma, pin.name)
 
         _paint_selection(p, self, body)
@@ -305,6 +400,23 @@ class CableItem(_NodeMixin, QGraphicsObject):
     def content_top(self):
         return HEADER_H + _band_h(_pixmap(self.cable.image))
 
+    def _first_port_offset(self):
+        return self.content_top() + PIN_H / 2
+
+    def body_width(self):
+        """Ancho de la caja segun el encabezado (ref · longitud · PN · tipo) y
+        los codigos de conductor, nunca menor que BOX_WIDTH."""
+        if self._w is None:
+            cab = self.cable
+            line2 = " · ".join(x for x in (cab.sku, cab.part_number) if x)
+            w = _header_width(f"⎓ {cab.ref}", line2,
+                              _fmt_len(cab.length_mm), cab.type_label())
+            for code in cab.conductor_colors:
+                # numero (izq) + swatch (centro) + codigo (der)
+                w = max(w, 30 + _text_w(code, True, 8) + 30)
+            self._w = max(BOX_WIDTH, w)
+        return self._w
+
     def _build_ports(self):
         for p in self.ports:
             if p.scene():
@@ -312,6 +424,7 @@ class CableItem(_NodeMixin, QGraphicsObject):
         self.ports = []
         n = self.cable.conductor_count
         top = self.content_top()
+        w = self.body_width()
         for i in range(n):
             y = top + i * PIN_H + PIN_H / 2
             lp = PortItem(self, Endpoint("cable", self.cable.id, f"{i}:L"),
@@ -319,7 +432,7 @@ class CableItem(_NodeMixin, QGraphicsObject):
             lp.setPos(0, y)
             rp = PortItem(self, Endpoint("cable", self.cable.id, f"{i}:R"),
                           QPointF(1, 0))
-            rp.setPos(BOX_WIDTH, y)
+            rp.setPos(w, y)
             self.ports += [lp, rp]
 
     def body_height(self):
@@ -327,43 +440,44 @@ class CableItem(_NodeMixin, QGraphicsObject):
 
     def boundingRect(self):
         m = PIN_NUB_R + 2
-        return QRectF(-m, -m, BOX_WIDTH + 2 * m, self.body_height() + 2 * m)
+        return QRectF(-m, -m, self.body_width() + 2 * m, self.body_height() + 2 * m)
 
     def port_for(self, port_id: str):
         return next((p for p in self.ports if p.endpoint.port == port_id), None)
 
     def paint(self, p, option, widget=None):
         cab = self.cable
-        body = QRectF(0, 0, BOX_WIDTH, self.body_height())
-        p.setPen(QPen(QColor("#0d1b22"), 1.5))
-        p.setBrush(QBrush(QColor("#212b33")))
+        w = self.body_width()
+        body = QRectF(0, 0, w, self.body_height())
+        p.setPen(QPen(_ink("#0d1b22", "#37474f"), 1.5))
+        p.setBrush(QBrush(_ink("#212b33", "#ffffff")))
         p.drawRoundedRect(body, 6, 6)
 
         pm = _pixmap(cab.image)
         if pm:
-            _draw_image_band(p, pm, QRectF(1, HEADER_H, BOX_WIDTH - 2, IMAGE_BAND))
+            _draw_image_band(p, pm, QRectF(1, HEADER_H, w - 2, IMAGE_BAND))
 
         # cabecera: ref + longitud (apartado) en linea 1, AWG/hilos en linea 2
         _paint_header(p, QColor("#37474f"), f"⎓ {cab.ref}",
                       cab.part_number, cab.sku,
                       subtitle=_fmt_len(cab.length_mm),
-                      subtitle2=cab.type_label())
+                      subtitle2=cab.type_label(), width=w)
 
         # filas de conductores con swatch de color
         top = self.content_top()
-        f = QFont(); f.setPointSize(8); p.setFont(f)
+        f = QFont(); f.setPointSize(8); f.setBold(PRINT_MODE); p.setFont(f)
         for i, code in enumerate(cab.conductor_colors):
             y = top + i * PIN_H
             col = QColor(WIRE_COLORS.get(code, "#888888"))
             # franja de color del conductor de extremo a extremo
-            p.fillRect(QRectF(14, y + PIN_H / 2 - 2, BOX_WIDTH - 28, 4), col)
+            p.fillRect(QRectF(14, y + PIN_H / 2 - 2, w - 28, 4), col)
             # swatch
             p.setBrush(QBrush(col)); p.setPen(QPen(QColor("#0d1b22"), 1))
-            p.drawRect(QRectF(BOX_WIDTH / 2 - 9, y + 4, 18, PIN_H - 8))
-            p.setPen(QColor("#eceff1"))
+            p.drawRect(QRectF(w / 2 - 9, y + 4, 18, PIN_H - 8))
+            p.setPen(_ink("#eceff1", "#1b2730"))
             p.drawText(QRectF(2, y, 14, PIN_H),
                        Qt.AlignVCenter | Qt.AlignHCenter, str(i + 1))
-            p.drawText(QRectF(BOX_WIDTH - 26, y, 24, PIN_H),
+            p.drawText(QRectF(w - 26, y, 24, PIN_H),
                        Qt.AlignVCenter | Qt.AlignHCenter, code)
 
         _paint_selection(p, self, body)
@@ -425,8 +539,8 @@ class TerminalItem(_NodeMixin, QGraphicsObject):
         t = self.terminal
         body = self._body_rect()
         accent = QColor("#546e7a")
-        p.setPen(QPen(QColor("#0d1b22"), 1.5))
-        p.setBrush(QBrush(accent.darker(130)))
+        p.setPen(QPen(_ink("#0d1b22", "#37474f"), 1.5))
+        p.setBrush(QBrush(_ink(accent.darker(130), "#ffffff")))
         p.drawRoundedRect(body, 4, 4)
         pm = _pixmap(t.image)
         if t.orientation == "v":
@@ -463,18 +577,18 @@ class TerminalItem(_NodeMixin, QGraphicsObject):
         available = TERM_H_W - tx - 4
 
         f = QFont(); f.setBold(True); f.setPointSize(8); p.setFont(f)
-        p.setPen(QColor("#eceff1"))
+        p.setPen(_ink("#eceff1", "#1b2730"))
         p.drawText(QRectF(tx, 2, available * 0.45, TERM_H_H / 2),
                    Qt.AlignVCenter | Qt.AlignLeft, t.ref)
 
         code = t.sku or t.part_number
         f.setBold(False); f.setPointSize(7); p.setFont(f)
-        p.setPen(QColor("#80deea"))
+        p.setPen(_ink("#80deea", "#00695c"))
         p.drawText(QRectF(tx + available * 0.45, 2, available * 0.55, TERM_H_H / 2),
                    Qt.AlignVCenter | Qt.AlignRight, code)
 
         name = t.description or t.part_number
-        p.setPen(QColor("#b0bec5"))
+        p.setPen(_ink("#b0bec5", "#546e7a"))
         p.drawText(QRectF(tx, TERM_H_H / 2, available, TERM_H_H / 2 - 2),
                    Qt.AlignVCenter | Qt.AlignLeft, name)
 
@@ -488,7 +602,7 @@ class TerminalItem(_NodeMixin, QGraphicsObject):
         p.fillRect(QRectF(0, 3, TERM_V_W, 3), accent)
 
         f = QFont(); f.setBold(True); f.setPointSize(8); p.setFont(f)
-        p.setPen(QColor("#eceff1"))
+        p.setPen(_ink("#eceff1", "#1b2730"))
         p.drawText(QRectF(4, 6, TERM_V_W - 8, 16),
                    Qt.AlignVCenter | Qt.AlignHCenter, t.ref)
 
@@ -508,13 +622,202 @@ class TerminalItem(_NodeMixin, QGraphicsObject):
         y_text = 23 + TERM_V_IMG + 1
         f.setBold(False); f.setPointSize(7); p.setFont(f)
         name = t.description or t.part_number
-        p.setPen(QColor("#b0bec5"))
+        p.setPen(_ink("#b0bec5", "#546e7a"))
         p.drawText(QRectF(2, y_text, TERM_V_W - 4, 14),
                    Qt.AlignVCenter | Qt.AlignHCenter, name)
         code = t.sku or t.part_number
-        p.setPen(QColor("#80deea"))
+        p.setPen(_ink("#80deea", "#00695c"))
         p.drawText(QRectF(2, y_text + 14, TERM_V_W - 4, 14),
                    Qt.AlignVCenter | Qt.AlignHCenter, code)
+
+
+# ===================================================================
+#  Cajetin de ensamblaje (tabla terminal<->conector + comentario)
+# ===================================================================
+NOTE_TITLE_H = 22
+NOTE_HEAD_H = 18
+NOTE_ROW_H = 16
+NOTE_CELL_PAD = 8
+NOTE_PAD = 8
+NOTE_COMMENT_LH = 13
+
+# etiquetas por defecto de las columnas del cajetin (clave -> nombre visible)
+_NOTE_DEF_LABELS = {"item": "Ítem"}
+_NOTE_DEF_LABELS.update(dict(ASSEMBLY_FIELDS))
+
+
+class NoteItem(_NodeMixin, QGraphicsObject):
+    """Cajetin colocable: tabla de qué terminal va con qué conector, con
+    columnas seleccionables y un comentario libre. Como vive en el lienzo,
+    aparece en la hoja del diagrama y en el PDF."""
+
+    def __init__(self, note: Note):
+        super().__init__()
+        self._init_node(note)
+        self.note = note
+        self.setZValue(2)
+
+    def refresh(self):
+        self.prepareGeometryChange()
+        self.update()
+
+    def _label(self, key):
+        return self.note.labels.get(key) or _NOTE_DEF_LABELS.get(key, key)
+
+    def _cols(self):
+        # "Ítem" siempre primero; luego campos de fábrica seleccionados en su
+        # orden, y al final los parámetros personalizados seleccionados.
+        sel = self.note.fields or []
+        builtin = {k for k, _ in ASSEMBLY_FIELDS}
+        keys = ["item"]
+        keys += [k for k, _ in ASSEMBLY_FIELDS if k in sel]
+        keys += [k for k in sel if k not in builtin and k != "item"]
+        return [(k, self._label(k)) for k in keys]
+
+    def _rows(self):
+        h = getattr(self.scene(), "harness", None)
+        return reports.assembly_block_rows(h) if h is not None else []
+
+    def _comment_lines(self):
+        return self.note.comment.splitlines() if self.note.comment else []
+
+    def _layout(self):
+        cols = self._cols()
+        rows = self._rows()
+        widths = []
+        for k, lbl in cols:
+            w = _text_w(lbl, True, 7)
+            for r in rows:
+                indent = 10 if (k == "item" and r.get("level")) else 0
+                w = max(w, _text_w(str(r.get(k, "")), True, 7) + indent)
+            widths.append(w + 2 * NOTE_CELL_PAD)
+        table_w = sum(widths)
+        clines = self._comment_lines()
+        comment_w = max([_text_w(l, False, 7) for l in clines], default=0)
+        title_w = _text_w(self.note.title, True, 9)
+        w = max(140.0, table_w, comment_w + 2 * NOTE_PAD, title_w + 2 * NOTE_PAD)
+        n = max(1, len(rows))
+        h = NOTE_TITLE_H + NOTE_HEAD_H + n * NOTE_ROW_H
+        if clines:
+            h += NOTE_PAD + len(clines) * NOTE_COMMENT_LH + NOTE_PAD // 2
+        return w, h, cols, rows, widths, clines
+
+    def boundingRect(self):
+        w, h, *_ = self._layout()
+        m = 3
+        return QRectF(-m, -m, w + 2 * m, h + 2 * m)
+
+    def paint(self, p, option, widget=None):
+        w, h, cols, rows, widths, clines = self._layout()
+        bg = QColor("#ffffff") if PRINT_MODE else QColor("#16202a")
+        edge = _ink("#0d1b22", "#37474f")
+        p.setPen(QPen(edge, 1.2))
+        p.setBrush(QBrush(bg))
+        p.drawRoundedRect(QRectF(0, 0, w, h), 4, 4)
+
+        # barra de titulo
+        title_fill = _print_tint(QColor("#37474f")) if PRINT_MODE else QColor("#37474f")
+        p.setPen(Qt.NoPen)
+        path = QPainterPath(); path.addRoundedRect(QRectF(0, 0, w, NOTE_TITLE_H), 4, 4)
+        p.fillPath(path, title_fill)
+        p.fillRect(QRectF(0, NOTE_TITLE_H - 6, w, 6), title_fill)
+        light = title_fill.lightnessF() > 0.6
+        p.setPen(QColor("#11181f") if light else QColor("#ffffff"))
+        f = QFont(); f.setBold(True); f.setPointSize(9); p.setFont(f)
+        p.drawText(QRectF(NOTE_PAD, 0, w - 2 * NOTE_PAD, NOTE_TITLE_H),
+                   Qt.AlignVCenter | Qt.AlignLeft, self.note.title)
+
+        # cabecera de columnas
+        y = NOTE_TITLE_H
+        head_bg = QColor(0, 0, 0, 25) if PRINT_MODE else QColor(255, 255, 255, 18)
+        p.fillRect(QRectF(0, y, w, NOTE_HEAD_H), head_bg)
+        f.setBold(True); f.setPointSize(7); p.setFont(f)
+        p.setPen(_ink("#cfd8dc", "#1b2730"))
+        x = 0.0
+        for (k, lbl), cw in zip(cols, widths):
+            p.drawText(QRectF(x + NOTE_CELL_PAD, y, cw - NOTE_CELL_PAD, NOTE_HEAD_H),
+                       Qt.AlignVCenter | Qt.AlignLeft, lbl)
+            x += cw
+        # filas (conector/cable en negrita; terminal indentado y atenuado)
+        y += NOTE_HEAD_H
+        grid = _ink("#26323c", "#cfd8dc")
+        for i, r in enumerate(rows or [{}]):
+            lvl = r.get("level", 0)
+            if i % 2:
+                p.fillRect(QRectF(0, y, w, NOTE_ROW_H),
+                           QColor(0, 0, 0, 10) if PRINT_MODE else QColor(255, 255, 255, 10))
+            x = 0.0
+            for (k, lbl), cw in zip(cols, widths):
+                f.setBold(lvl == 0 or PRINT_MODE); p.setFont(f)
+                if lvl == 0:
+                    p.setPen(_ink("#e0e6eb", "#11181f"))
+                else:
+                    p.setPen(_ink("#90a4ae", "#37474f"))
+                indent = NOTE_CELL_PAD + (10 if (k == "item" and lvl) else 0)
+                p.drawText(QRectF(x + indent, y, cw - indent - 2, NOTE_ROW_H),
+                           Qt.AlignVCenter | Qt.AlignLeft, str(r.get(k, "")))
+                x += cw
+            y += NOTE_ROW_H
+        # separadores verticales de columna
+        p.setPen(QPen(grid, 0.6))
+        x = 0.0
+        for cw in widths[:-1]:
+            x += cw
+            p.drawLine(int(x), NOTE_TITLE_H, int(x), int(y))
+
+        # comentario
+        if clines:
+            p.setPen(QPen(grid, 0.6))
+            p.drawLine(0, int(y), int(w), int(y))
+            cy = y + NOTE_PAD // 2
+            f.setBold(False); f.setItalic(True); f.setPointSize(7); p.setFont(f)
+            p.setPen(_ink("#90a4ae", "#50606a"))
+            for line in clines:
+                p.drawText(QRectF(NOTE_PAD, cy, w - 2 * NOTE_PAD, NOTE_COMMENT_LH),
+                           Qt.AlignVCenter | Qt.AlignLeft, line)
+                cy += NOTE_COMMENT_LH
+            f.setItalic(False); p.setFont(f)
+
+        _paint_selection(p, self, QRectF(0, 0, w, h))
+
+    def mouseDoubleClickEvent(self, e):
+        w, h, cols, rows, widths, clines = self._layout()
+        pos = e.pos()
+        # doble clic en la fila de cabecera -> renombrar esa columna (estilo KiCad)
+        if NOTE_TITLE_H <= pos.y() < NOTE_TITLE_H + NOTE_HEAD_H:
+            x = 0.0
+            for (k, lbl), cw in zip(cols, widths):
+                if x <= pos.x() < x + cw:
+                    self._rename_column(k)
+                    e.accept()
+                    return
+                x += cw
+        # en cualquier otra parte -> editar el cajetin (campos / título / comentario)
+        views = self.scene().views() if self.scene() else []
+        if views:
+            win = views[0].window()
+            if hasattr(win, "edit_note"):
+                win.edit_note(self.note)
+                e.accept()
+                return
+        super().mouseDoubleClickEvent(e)
+
+    def _rename_column(self, key):
+        from PySide6.QtWidgets import QInputDialog
+        cur = self._label(key)
+        text, ok = QInputDialog.getText(
+            None, "Renombrar columna", f"Nombre de la columna «{key}»:", text=cur)
+        if not ok:
+            return
+        text = text.strip()
+        if text and text != _NOTE_DEF_LABELS.get(key, key):
+            self.note.labels[key] = text
+        else:
+            self.note.labels.pop(key, None)
+        self.refresh()
+        sc = self.scene()
+        if sc is not None and hasattr(sc, "changed_model"):
+            sc.changed_model.emit()
 
 
 # ===================================================================
@@ -530,38 +833,56 @@ def _fmt_len(mm: float) -> str:
     return f"{mm:.0f} mm"
 
 
-def _paint_header(p, base, ref, part_number, sku, subtitle="", subtitle2=""):
-    header = QRectF(0, 0, BOX_WIDTH, HEADER_H)
+def _paint_header(p, base, ref, part_number, sku, subtitle="", subtitle2="",
+                  width=BOX_WIDTH):
+    header = QRectF(0, 0, width, HEADER_H)
+    # en impresion el encabezado va con fondo claro (tinte del color del
+    # componente) y texto oscuro; en pantalla conserva el color pleno.
+    fill = _print_tint(base) if PRINT_MODE else QColor(base)
     p.setPen(Qt.NoPen)
     path = QPainterPath()
     path.addRoundedRect(header, 6, 6)
-    p.fillPath(path, base)
-    p.fillRect(QRectF(0, HEADER_H - 8, BOX_WIDTH, 8), base)
+    p.fillPath(path, fill)
+    p.fillRect(QRectF(0, HEADER_H - 8, width, 8), fill)
+    if PRINT_MODE:
+        # linea de acento con el color del componente, para conservar identidad
+        p.fillRect(QRectF(0, HEADER_H - 2, width, 2), base)
+    # color de texto segun la luminancia del fondo del encabezado, para que el
+    # nombre sea legible tanto sobre colores oscuros como claros (y en papel).
+    light_fill = fill.lightnessF() > 0.6
+    ref_col = QColor("#11181f") if light_fill else QColor("#ffffff")
+    line2_col = QColor("#33424c") if light_fill else QColor("#b7c2c9")
+    sub_col = QColor("#7a5600") if light_fill else QColor("#ffd180")
+    sub2_col = QColor("#4a5a64") if light_fill else QColor("#90a4ae")
     f = QFont(); f.setBold(True); f.setPointSize(9); p.setFont(f)
-    p.setPen(QColor("#ffffff"))
-    p.drawText(QRectF(6, 1, BOX_WIDTH - 12, 15), Qt.AlignVCenter | Qt.AlignLeft, ref)
+    p.setPen(ref_col)
+    p.drawText(QRectF(6, 1, width - 12, 15), Qt.AlignVCenter | Qt.AlignLeft, ref)
     f.setBold(False); f.setPointSize(7); p.setFont(f)
     if subtitle:
         # badge de longitud, como apartado del nombre
-        p.setPen(QColor("#ffd180"))
-        p.drawText(QRectF(6, 1, BOX_WIDTH - 12, 15),
+        p.setPen(sub_col)
+        p.drawText(QRectF(6, 1, width - 12, 15),
                    Qt.AlignVCenter | Qt.AlignRight, subtitle)
-    p.setPen(QColor("#dfe6ea"))
     line2 = " · ".join(x for x in (sku, part_number) if x)
-    p.setPen(QColor("#b7c2c9"))
-    p.drawText(QRectF(6, 14, BOX_WIDTH - 12, 14),
+    p.setPen(line2_col)
+    p.drawText(QRectF(6, 14, width - 12, 14),
                Qt.AlignVCenter | Qt.AlignLeft, line2)
     if subtitle2:
-        p.setPen(QColor("#90a4ae"))
-        p.drawText(QRectF(6, 14, BOX_WIDTH - 12, 14),
+        p.setPen(sub2_col)
+        p.drawText(QRectF(6, 14, width - 12, 14),
                    Qt.AlignVCenter | Qt.AlignRight, subtitle2)
 
 
 def _paint_selection(p, item, body):
-    if item.isSelected():
-        p.setPen(QPen(QColor("#ffb300"), 2, Qt.DashLine))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(body, 6, 6)
+    if not item.isSelected():
+        return
+    # relleno tenue + borde resaltado para que la seleccion se note de un vistazo
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(255, 179, 0, 45))
+    p.drawRoundedRect(body, 6, 6)
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(QColor("#ffb300"), 2.5))
+    p.drawRoundedRect(body.adjusted(-1.5, -1.5, 1.5, 1.5), 7, 7)
 
 
 # ===================================================================
@@ -622,7 +943,12 @@ class WireItem(QGraphicsPathItem):
             self._mid = None
             return
         da, db = self.src.exit_dir(), self.dst.exit_dir()
-        off = max(40.0, (abs(b.x() - a.x()) + abs(b.y() - a.y())) * 0.35)
+        # tramo de salida = la MITAD del hueco horizontal: así el control del
+        # origen y el del destino se encuentran en el medio sin sobrepasarse
+        # (el sobrepaso era lo que doblaba la curva y cruzaba hilos paralelos).
+        # Un mínimo pequeño hace que el hilo salga recto del puerto.
+        dx = abs(b.x() - a.x())
+        off = max(16.0, dx * 0.5)
         c1 = QPointF(a.x() + da.x() * off, a.y() + da.y() * off)
         c2 = QPointF(b.x() + db.x() * off, b.y() + db.y() * off)
         path = QPainterPath(a)

@@ -19,19 +19,20 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 
-from .model import Cable, Connector, Pin, Terminal
+from .harness import Cable, Connector, Pin, Terminal
 
 _FROZEN = getattr(sys, "frozen", False)
 _PKG_DIR = os.path.dirname(__file__)
-# nombre del paquete (rapidharness / wireflash): sirve para el data dir
-# empaquetado y para la carpeta de datos de usuario, sin fijar la marca.
-_PKG_NAME = __package__ or os.path.basename(_PKG_DIR)
+# este modulo vive en model/: anclar rutas al paquete de nivel superior
+_TOP_PKG_DIR = _PKG_DIR
+for _ in range((__package__ or "").count(".")):
+    _TOP_PKG_DIR = os.path.dirname(_TOP_PKG_DIR)
+_PKG_NAME = (__package__ or os.path.basename(_TOP_PKG_DIR)).split(".")[0]
 
-# --- datos de fabrica (libreria estandar): empaquetados con la app ---
 if _FROZEN and hasattr(sys, "_MEIPASS"):
     _DATA_DIR = os.path.join(sys._MEIPASS, _PKG_NAME, "data")
 else:
-    _DATA_DIR = os.path.join(_PKG_DIR, "data")
+    _DATA_DIR = os.path.join(_TOP_PKG_DIR, "data")
 _BUILTIN_DIR = os.path.join(_DATA_DIR, "components")
 
 
@@ -64,7 +65,7 @@ def _pick_project_root() -> str:
     if _FROZEN:
         candidates.append(os.path.dirname(sys.executable))
     else:
-        candidates.append(os.path.dirname(_PKG_DIR))
+        candidates.append(os.path.dirname(_TOP_PKG_DIR))
     xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(
         os.path.expanduser("~"), ".local", "share")
     candidates.append(os.path.join(xdg, _PKG_NAME))
@@ -116,6 +117,8 @@ class Part:
     terminal_desc: str = ""                     # descripcion (tubular, herradura, size 16…)
     compatible_terminals: list[str] = field(default_factory=list)  # PNs válidos para este conector
     pins: list[str] = field(default_factory=list)
+    params: dict = field(default_factory=dict)  # parámetros personalizados (clave->valor)
+    field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""                       # archivo del que proviene (para reescribir)
 
     kind = "connector"
@@ -135,6 +138,7 @@ class Part:
             color=self.color, image=self.image_abs(), x=x, y=y,
             terminal=self.terminal, terminal_desc=self.terminal_desc,
             pins=[Pin(number=n) for n in self.pins],
+            params=dict(self.params),
         )
 
     def to_dict(self) -> dict:
@@ -148,6 +152,10 @@ class Part:
         }
         if self.compatible_terminals:
             d["compatible_terminals"] = list(self.compatible_terminals)
+        if self.params:
+            d["params"] = dict(self.params)
+        if self.field_labels:
+            d["field_labels"] = dict(self.field_labels)
         return d
 
     @classmethod
@@ -161,7 +169,9 @@ class Part:
             terminal=d.get("terminal", ""),
             terminal_desc=d.get("terminal_desc", ""),
             compatible_terminals=list(d.get("compatible_terminals", [])),
-            pins=list(d.get("pins", [])), source_path=source_path,
+            pins=list(d.get("pins", [])),
+            params=dict(d.get("params", {})),
+            field_labels=dict(d.get("field_labels", {})), source_path=source_path,
         )
 
 
@@ -178,6 +188,8 @@ class CablePart:
     gauge: str = "22"
     conductor_colors: list[str] = field(default_factory=list)
     image: str = ""
+    params: dict = field(default_factory=dict)   # parámetros personalizados
+    field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""
 
     kind = "cable"
@@ -204,16 +216,22 @@ class CablePart:
             cable_type=self.cable_type, gauge=self.gauge,
             conductor_colors=list(self.conductor_colors),
             image=self.image_abs(), length_mm=length_mm, x=x, y=y,
+            params=dict(self.params),
         )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "kind": "cable", "sku": self.sku,
             "part_number": self.part_number, "manufacturer": self.manufacturer,
             "description": self.description, "category": self.category,
             "cable_type": self.cable_type, "gauge": self.gauge,
             "conductor_colors": list(self.conductor_colors), "image": self.image,
         }
+        if self.params:
+            d["params"] = dict(self.params)
+        if self.field_labels:
+            d["field_labels"] = dict(self.field_labels)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict, source_path: str = "") -> "CablePart":
@@ -224,7 +242,9 @@ class CablePart:
             category=d.get("category", "Cables"),
             cable_type=d.get("cable_type", ""), gauge=d.get("gauge", "22"),
             conductor_colors=list(d.get("conductor_colors", [])),
-            image=d.get("image", ""), source_path=source_path,
+            image=d.get("image", ""),
+            params=dict(d.get("params", {})),
+            field_labels=dict(d.get("field_labels", {})), source_path=source_path,
         )
 
 
@@ -239,6 +259,8 @@ class TerminalPart:
     category: str = "Terminales"
     image: str = ""
     orientation: str = "h"    # "h" horizontal | "v" vertical
+    params: dict = field(default_factory=dict)        # parámetros personalizados
+    field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""
 
     kind = "terminal"
@@ -259,12 +281,17 @@ class TerminalPart:
         )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "kind": "terminal", "sku": self.sku,
             "part_number": self.part_number, "manufacturer": self.manufacturer,
             "description": self.description, "category": self.category,
             "image": self.image, "orientation": self.orientation,
         }
+        if self.params:
+            d["params"] = dict(self.params)
+        if self.field_labels:
+            d["field_labels"] = dict(self.field_labels)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict, source_path: str = "") -> "TerminalPart":
@@ -275,6 +302,8 @@ class TerminalPart:
             category=d.get("category", "Terminales"),
             image=d.get("image", ""),
             orientation=d.get("orientation", "h"),
+            params=dict(d.get("params", {})),
+            field_labels=dict(d.get("field_labels", {})),
             source_path=source_path,
         )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -15,15 +16,26 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QAbstractItemView,
+    QHeaderView,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from ..model import ASSEMBLY_FIELDS
 
-from .library import CablePart, ComponentLibrary, Part, TerminalPart
+# Campos fijos descriptivos que viven en la tabla de campos del editor:
+# (atributo del modelo, etiqueta por defecto). El nombre es renombrable.
+_FIELD_DEFS = [("sku", "SKU"), ("manufacturer", "Fabricante"),
+               ("description", "Descripción")]
+
+from ..model.library import CablePart, ComponentLibrary, Part, TerminalPart
 
 
 class ProjectInfoDialog(QDialog):
@@ -73,17 +85,22 @@ class ProjectInfoDialog(QDialog):
 class PdfExportDialog(QDialog):
     """Opciones de exportación a PDF: tamaño, orientación y plantilla."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, page_name: str = "A4",
+                 landscape: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Exportar PDF")
         self.resize(440, 220)
         lay = QVBoxLayout(self)
         form = QFormLayout()
         self.size = QComboBox(); self.size.addItems(["A4", "A3", "A2", "A1"])
+        # preseleccionar el tamaño/orientación de hoja ya configurados
+        if page_name in ("A4", "A3", "A2", "A1"):
+            self.size.setCurrentText(page_name)
         form.addRow("Tamaño de hoja", self.size)
         self.orient = QComboBox()
         self.orient.addItem("Vertical", False)
         self.orient.addItem("Horizontal", True)
+        self.orient.setCurrentIndex(1 if landscape else 0)
         form.addRow("Orientación", self.orient)
         self.template = QComboBox()
         self.template.addItem("Genérica (marco + cajetín)", "generic")
@@ -309,14 +326,8 @@ class ComponentEditorDialog(QDialog):
             self.lib_combo.setEnabled(False)
         form.addRow("Guardar en", self.lib_combo)
 
-        self.sku = QLineEdit(getattr(component, "sku", "") if component else "")
-        form.addRow("SKU", self.sku)
         self.pn = QLineEdit(getattr(component, "part_number", "") if component else "")
         form.addRow("Part number*", self.pn)
-        self.mfr = QLineEdit(getattr(component, "manufacturer", "") if component else "")
-        form.addRow("Fabricante", self.mfr)
-        self.desc = QLineEdit(getattr(component, "description", "") if component else "")
-        form.addRow("Descripción", self.desc)
         self.cat = QLineEdit(getattr(component, "category", "") if component else "General")
         self.cat.setPlaceholderText('Usa "/" para subcategorías: Molex/MicroFit')
         form.addRow("Categoría", self.cat)
@@ -341,18 +352,16 @@ class ComponentEditorDialog(QDialog):
         self.pins.setPlaceholderText('Ej: "1 2 3 4"  o un número como "8"')
         self.pins_label = QLabel("Pines")
         form.addRow(self.pins_label, self.pins)
-        self.terminal = QLineEdit(getattr(component, "terminal", "")
-                                  if isinstance(component, Part) else "")
-        self.terminal.setPlaceholderText("PN del terminal/contacto por defecto")
-        self.terminal_label = QLabel("Terminal (PN)")
-        form.addRow(self.terminal_label, self.terminal)
-        self.terminal_desc = QLineEdit(getattr(component, "terminal_desc", "")
-                                       if isinstance(component, Part) else "")
-        self.terminal_desc.setPlaceholderText("tubular size 16 · herradura · sellado…")
-        self.terminal_desc_label = QLabel("Desc. terminal")
-        form.addRow(self.terminal_desc_label, self.terminal_desc)
+        # Terminales: SOLO se asocian desde la librería de terminales (no se
+        # escribe texto libre). Lista de compatibles + un terminal por defecto
+        # elegido entre esos compatibles.
         compat = getattr(component, "compatible_terminals", []) if isinstance(component, Part) else []
         self._compat: list[str] = list(compat)
+        cur_term = getattr(component, "terminal", "") if isinstance(component, Part) else ""
+        # un terminal por defecto preexistente se considera compatible
+        if cur_term and cur_term not in self._compat:
+            self._compat.append(cur_term)
+        self._initial_term = cur_term
         self._term_desc = self._collect_terminal_descs()
         compat_box = QVBoxLayout(); compat_box.setContentsMargins(0, 0, 0, 0)
         self.compat_view = QListWidget()
@@ -368,7 +377,15 @@ class ComponentEditorDialog(QDialog):
         self.compat_terms_w = _wrap(compat_box)
         self.compat_terms_label = QLabel("Terminales compatibles")
         form.addRow(self.compat_terms_label, self.compat_terms_w)
+        # terminal por defecto del conector: combo restringido a los compatibles
+        self.def_term = QComboBox()
+        self.def_term.setToolTip("Terminal por defecto de todos los pines. Solo se "
+                                 "puede elegir entre los terminales compatibles\n"
+                                 "(agrégalos arriba desde la librería de terminales).")
+        self.def_term_label = QLabel("Terminal por defecto")
+        form.addRow(self.def_term_label, self.def_term)
         self._refresh_compat_view()
+        self._refresh_default_term()
 
         # --- campos de cable ---
         self.ctype = QLineEdit(getattr(component, "cable_type", "")
@@ -396,6 +413,35 @@ class ComponentEditorDialog(QDialog):
         self.orient_label = QLabel("Orientación")
         form.addRow(self.orient_label, self.orient)
 
+        # --- tabla de campos (estilo KiCad): nombre + valor editables ---
+        # Filas fijas (SKU/Fabricante/Descripción): se puede renombrar su nombre
+        # (se recuerda en field_labels) y editar su valor. Botón «+ Fila» agrega
+        # parámetros personalizados. PN* y Categoría siguen como campos aparte
+        # (son estructurales: identidad y agrupación del árbol).
+        fbox = QVBoxLayout(); fbox.setContentsMargins(0, 0, 0, 0)
+        self.fields_table = QTableWidget(0, 2)
+        self.fields_table.setHorizontalHeaderLabels(["Campo", "Valor"])
+        self.fields_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.fields_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.fields_table.verticalHeader().setVisible(False)
+        self.fields_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.fields_table.setFixedHeight(160)
+        fbox.addWidget(self.fields_table)
+        frow = QHBoxLayout()
+        addf = QPushButton("+ Fila"); addf.clicked.connect(lambda: self._add_field_row())
+        delf = QPushButton("Quitar fila"); delf.clicked.connect(self._remove_field_row)
+        frow.addWidget(addf); frow.addWidget(delf); frow.addStretch(1)
+        fbox.addLayout(frow)
+        self.fields_w = _wrap(fbox)
+        form.addRow(QLabel("Campos\n(nombre / valor)"), self.fields_w)
+        flabels = getattr(component, "field_labels", {}) if component else {}
+        for key, deflabel in _FIELD_DEFS:
+            name = flabels.get(key, deflabel)
+            value = getattr(component, key, "") if component else ""
+            self._add_field_row(name, value, key=key)
+        for k, v in (getattr(component, "params", {}) or {}).items():
+            self._add_field_row(k, str(v), key="")
+
         lay.addLayout(form)
         hint = QLabel("Colores válidos: BK RD BU GN YE WH OR VT GY BN PK")
         hint.setStyleSheet("color:#90a4ae;")
@@ -414,14 +460,15 @@ class ComponentEditorDialog(QDialog):
         is_term = kind == "terminal"
         self.color_row_w.setVisible(is_conn)
         self.pins.setVisible(is_conn); self.pins_label.setVisible(is_conn)
-        self.terminal.setVisible(is_conn); self.terminal_label.setVisible(is_conn)
-        self.terminal_desc.setVisible(is_conn); self.terminal_desc_label.setVisible(is_conn)
         self.compat_terms_w.setVisible(is_conn); self.compat_terms_label.setVisible(is_conn)
+        self.def_term.setVisible(is_conn); self.def_term_label.setVisible(is_conn)
         self.ctype.setVisible(is_cable); self.ctype_label.setVisible(is_cable)
         self.gauge.setVisible(is_cable); self.gauge_label.setVisible(is_cable)
         self.conductors.setVisible(is_cable)
         self.cond_label.setVisible(is_cable)
         self.orient.setVisible(is_term); self.orient_label.setVisible(is_term)
+        # la tabla de campos (SKU/Fabricante/Descripción + personalizados) aplica
+        # a todos los tipos, así que siempre visible.
         # al crear un terminal nuevo, sugiere su categoría propia
         if is_term and not self.editing and self.cat.text().strip() in ("", "General"):
             self.cat.setText("Terminales")
@@ -469,6 +516,20 @@ class ComponentEditorDialog(QDialog):
             it.setData(Qt.UserRole, pn)
             self.compat_view.addItem(it)
 
+    def _refresh_default_term(self):
+        """Rellena el combo del terminal por defecto con los compatibles,
+        conservando la selección actual si sigue siendo válida."""
+        prev = (self.def_term.currentData() if self.def_term.count()
+                else self._initial_term)
+        self.def_term.blockSignals(True)
+        self.def_term.clear()
+        self.def_term.addItem("(ninguno)", "")
+        for pn in self._compat:
+            self.def_term.addItem(self._terminal_label(pn), pn)
+        idx = self.def_term.findData(prev or "")
+        self.def_term.setCurrentIndex(idx if idx >= 0 else 0)
+        self.def_term.blockSignals(False)
+
     def _pick_terminals(self):
         choices = self._terminal_choices()
         # incluye PNs ya elegidos aunque no estén en la librería (legacy)
@@ -486,6 +547,7 @@ class ComponentEditorDialog(QDialog):
         if dlg.exec():
             self._compat = dlg.selected()
             self._refresh_compat_view()
+            self._refresh_default_term()
 
     def _remove_terminal(self):
         for it in self.compat_view.selectedItems():
@@ -493,12 +555,52 @@ class ComponentEditorDialog(QDialog):
             if pn in self._compat:
                 self._compat.remove(pn)
         self._refresh_compat_view()
+        self._refresh_default_term()
 
     def _parse_list(self, text: str) -> list[str]:
         raw = text.replace(",", " ").split()
         if len(raw) == 1 and raw[0].isdigit():
             return [str(i) for i in range(1, int(raw[0]) + 1)]
         return raw
+
+    def _add_field_row(self, name: str = "", value: str = "", key: str = "") -> None:
+        """Agrega una fila a la tabla de campos. ``key`` no vacío = campo fijo
+        (sku/manufacturer/description), cuyo nombre es renombrable; vacío =
+        parámetro personalizado (su nombre ES la clave)."""
+        r = self.fields_table.rowCount()
+        self.fields_table.insertRow(r)
+        n_item = QTableWidgetItem(name)
+        n_item.setData(Qt.UserRole, key)
+        if key:
+            f = n_item.font(); f.setBold(True); n_item.setFont(f)
+        self.fields_table.setItem(r, 0, n_item)
+        self.fields_table.setItem(r, 1, QTableWidgetItem(value))
+
+    def _remove_field_row(self) -> None:
+        rows = sorted({i.row() for i in self.fields_table.selectedItems()},
+                      reverse=True)
+        for r in rows:
+            self.fields_table.removeRow(r)
+
+    def _collect_fields(self):
+        """Devuelve (builtin, params, field_labels) leyendo la tabla de campos."""
+        builtin = {"sku": "", "manufacturer": "", "description": ""}
+        params: dict = {}
+        field_labels: dict = {}
+        defmap = dict(_FIELD_DEFS)
+        for r in range(self.fields_table.rowCount()):
+            n_item = self.fields_table.item(r, 0)
+            v_item = self.fields_table.item(r, 1)
+            key = (n_item.data(Qt.UserRole) if n_item else "") or ""
+            name = (n_item.text().strip() if n_item else "")
+            val = (v_item.text().strip() if v_item else "")
+            if key:                       # campo fijo: nombre renombrable
+                builtin[key] = val
+                if name and name != defmap.get(key):
+                    field_labels[key] = name
+            elif name:                    # parámetro personalizado
+                params[name] = val
+        return builtin, params, field_labels
 
     def _on_save(self):
         pn = self.pn.text().strip()
@@ -511,9 +613,10 @@ class ComponentEditorDialog(QDialog):
             return
         # copia la imagen DENTRO de la librería (relativa, sin referencias externas)
         image = lib.import_image(self.image.text().strip())
-        common = dict(part_number=pn, sku=self.sku.text().strip(),
-                      manufacturer=self.mfr.text().strip(),
-                      description=self.desc.text().strip(),
+        builtin, params, field_labels = self._collect_fields()
+        common = dict(part_number=pn, sku=builtin["sku"],
+                      manufacturer=builtin["manufacturer"],
+                      description=builtin["description"],
                       category=self.cat.text().strip() or "General",
                       image=image)
         kind = self.type_combo.currentData()
@@ -523,14 +626,17 @@ class ComponentEditorDialog(QDialog):
                 QMessageBox.warning(self, "Falta dato", "Indica al menos un pin.")
                 return
             compat = list(self._compat)
+            def_term = (self.def_term.currentData() or "").strip()
             comp = Part(color=self.color.text().strip() or "#37474f",
-                        terminal=self.terminal.text().strip(),
-                        terminal_desc=self.terminal_desc.text().strip(),
+                        terminal=def_term,
+                        terminal_desc=self._term_desc.get(def_term, ""),
                         compatible_terminals=compat,
-                        pins=pins, **common)
+                        pins=pins, params=params, field_labels=field_labels,
+                        **common)
         elif kind == "terminal":
             common["category"] = self.cat.text().strip() or "Terminales"
-            comp = TerminalPart(orientation=self.orient.currentData(), **common)
+            comp = TerminalPart(orientation=self.orient.currentData(),
+                                params=params, field_labels=field_labels, **common)
         else:
             cond = self._parse_list(self.conductors.text())
             if not cond:
@@ -538,7 +644,8 @@ class ComponentEditorDialog(QDialog):
                 return
             comp = CablePart(cable_type=self.ctype.text().strip(),
                              gauge=self.gauge.text().strip() or "22",
-                             conductor_colors=cond, **common)
+                             conductor_colors=cond, params=params,
+                             field_labels=field_labels, **common)
         if self.editing:
             lib.update_component(self.original, comp)
         elif comp.kind == "connector":
@@ -550,3 +657,67 @@ class ComponentEditorDialog(QDialog):
         self.saved_library = lib
         self.saved_component = comp
         self.accept()
+
+
+class AssemblyBlockDialog(QDialog):
+    """Configura el cajetín de ensamblaje: título, columnas a incluir (campos de
+    fábrica + parámetros personalizados), el nombre de cada columna (editable,
+    estilo KiCad) y un comentario libre."""
+
+    def __init__(self, note, options=None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Cajetín de ensamblaje")
+        self.resize(460, 460)
+        # opciones = lista de (clave, etiqueta_por_defecto)
+        self._options = list(options) if options else list(ASSEMBLY_FIELDS)
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        self.title = QLineEdit(note.title)
+        form.addRow("Título", self.title)
+        lay.addLayout(form)
+
+        lay.addWidget(QLabel("Columnas (marca para incluir · edita el nombre "
+                             "de la columna):"))
+        self._checks: dict[str, QCheckBox] = {}
+        self._labels: dict[str, tuple] = {}
+        for key, deflabel in self._options:
+            row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+            cb = QCheckBox(key); cb.setChecked(key in note.fields)
+            le = QLineEdit(note.labels.get(key, deflabel))
+            le.setPlaceholderText(deflabel)
+            row.addWidget(cb, 1); row.addWidget(le, 1)
+            self._checks[key] = cb
+            self._labels[key] = (le, deflabel)
+            holder = QWidget(); holder.setLayout(row)
+            lay.addWidget(holder)
+
+        lay.addWidget(QLabel("Comentarios:"))
+        self.comment = QPlainTextEdit(note.comment)
+        self.comment.setPlaceholderText("Notas de armado, observaciones, revisión…")
+        lay.addWidget(self.comment)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._on_ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _on_ok(self):
+        if not any(cb.isChecked() for cb in self._checks.values()):
+            QMessageBox.warning(self, "Sin columnas",
+                                "Selecciona al menos un campo para el cajetín.")
+            return
+        self.accept()
+
+    def result_note(self) -> dict:
+        fields = [k for k, _ in self._options if self._checks[k].isChecked()]
+        labels: dict = {}
+        for k, (le, deflabel) in self._labels.items():
+            txt = le.text().strip()
+            if txt and txt != deflabel:
+                labels[k] = txt
+        return {
+            "title": self.title.text().strip() or "Ensamblaje",
+            "fields": fields,
+            "labels": labels,
+            "comment": self.comment.toPlainText(),
+        }
