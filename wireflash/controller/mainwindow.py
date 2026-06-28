@@ -981,14 +981,25 @@ class MainWindow(QMainWindow):
                                         "Nombre de la librería:")
         if not ok or not name.strip():
             return
-        root = ensure_libraries_root()
+        std = ensure_libraries_root()
+        # elegir DÓNDE crearla (por defecto, la carpeta estándar; puede ser
+        # cualquier carpeta, p.ej. una que hayas agregado en el gestor).
+        parent = QFileDialog.getExistingDirectory(
+            self, "Carpeta donde crear la librería (por defecto, la estándar)", std)
+        if not parent:
+            return
         from ..model.library import _slug
-        path = os.path.join(root, _slug(name.strip()))
+        path = os.path.join(parent, _slug(name.strip()))
         os.makedirs(path, exist_ok=True)
-        self.libraries.append(ComponentLibrary(path, name=name.strip()))
-        self.part_tree.populate()
-        self.statusBar().showMessage(
-            f"Librería creada en librerias/{os.path.basename(path)}", 5000)
+        # si se crea FUERA de la carpeta estándar, registrar su ruta para que
+        # persista entre sesiones, se cargue al arrancar y aparezca en
+        # "Guardar en" del editor de componentes.
+        if os.path.abspath(parent) != os.path.abspath(std):
+            if path not in self.library_paths:
+                self.library_paths.append(path)
+                theme.save_library_paths(self.library_paths)
+        self._load_all_libraries()
+        self.statusBar().showMessage(f"Librería creada: {path}", 6000)
 
     def import_library(self):
         d = QFileDialog.getExistingDirectory(
