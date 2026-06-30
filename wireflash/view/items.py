@@ -23,6 +23,7 @@ from ..model import (
     ASSEMBLY_FIELDS, Cable, Connector, Endpoint, Note, Terminal, Wire,
     WIRE_COLORS)
 from ..model import reports
+from ..model.library import resolve_instance_image
 
 # escala global de los items gráficos (conectores, cables, terminales, puertos).
 # 1.0 = tamaño base; se ajusta desde Configuración y se aplica por nodo con
@@ -110,6 +111,14 @@ def _pixmap(path: str) -> QPixmap | None:
         pm = QPixmap(path) if os.path.exists(path) else QPixmap()
         _PIXMAP_CACHE[path] = pm
     return pm if not pm.isNull() else None
+
+
+def _inst_pixmap(inst) -> QPixmap | None:
+    """Pixmap de una instancia, resolviendo su imagen por nickname de librería
+    (portable entre PCs). Cae a ruta absoluta para archivos antiguos."""
+    path = resolve_instance_image(
+        getattr(inst, "library", ""), getattr(inst, "image", "") or "")
+    return _pixmap(path)
 
 
 def _band_h(pm) -> float:
@@ -258,9 +267,26 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
         self._place_ports()
 
     def content_top(self):
-        return HEADER_H + _band_h(_pixmap(self.connector.image))
+        return HEADER_H + _band_h(_inst_pixmap(self.connector))
+
+    def _horizontal(self) -> bool:
+        """True si los pines salen por arriba/abajo (se disponen en columnas)."""
+        return self.connector.side in ("top", "bottom")
+
+    def _name_band_h(self) -> float:
+        """Alto extra (modo columnas) para los nombres de pin, dibujados en
+        VERTICAL. 0 si ningún pin tiene nombre."""
+        if not self._horizontal():
+            return 0.0
+        longest = max((_text_w(p.name, True, 8)
+                       for p in self.connector.pins if p.name), default=0.0)
+        # + holgura para que el texto no toque el encabezado/los números
+        return min(longest + 14, 160.0) if longest > 0 else 0.0
 
     def _first_port_offset(self):
+        # en arriba/abajo los puertos no van por filas: se snapea a GRID normal
+        if self._horizontal():
+            return None
         return self.content_top() + PIN_H / 2
 
     def body_width(self):
@@ -270,10 +296,16 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
             c = self.connector
             line2 = " · ".join(x for x in (c.sku, c.part_number) if x)
             w = _header_width(c.ref, line2)
-            for pin in c.pins:
-                # numero (col izq, ~34) + nombre + holgura del circulo de contacto
-                # (~16 a la derecha); en negrita por si imprime.
-                w = max(w, 50 + _text_w(pin.name, True, 8))
+            if self._horizontal():
+                # arriba/abajo: ancho mínimo por columna para que quepa el número
+                total = max(1, len(c.pins))
+                col = max(22, 14 + _text_w("88", True, 8))
+                w = max(w, total * col)
+            else:
+                for pin in c.pins:
+                    # numero (col izq, ~34) + nombre + holgura del circulo de
+                    # contacto (~16 a la derecha); en negrita por si imprime.
+                    w = max(w, 50 + _text_w(pin.name, True, 8))
             self._w = max(BOX_WIDTH, w)
         return self._w
 
@@ -300,6 +332,9 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
             self.scene().update_wires_for(self.node_id)
 
     def body_height(self):
+        if self._horizontal():
+            # arriba/abajo: banda de números + (si hay) banda de nombres vertical
+            return self.content_top() + PIN_H + self._name_band_h()
         return self.content_top() + max(1, len(self.connector.pins)) * PIN_H
 
     def boundingRect(self):
@@ -308,6 +343,52 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
 
     def port_for(self, port_id: str):
         return next((p for p in self.ports if p.endpoint.port == port_id), None)
+
+    def _paint_pin_columns(self, p, w: float, top: float) -> None:
+        """Numeración en COLUMNAS (modo arriba/abajo): cada celda queda alineada
+        con su puerto. El número va junto al borde por donde salen los puertos y
+        el nombre (si lo hay) en VERTICAL en la banda contigua."""
+        c = self.connector
+        total = max(1, len(c.pins))
+        cw = w / total
+        name_h = self._name_band_h()
+        full_h = PIN_H + name_h
+        bottom_side = c.side == "bottom"
+        # número adyacente a los puertos: top -> arriba; bottom -> abajo
+        num_y = top + name_h if bottom_side else top
+        name_y = top if bottom_side else top + PIN_H
+        for col, pin in enumerate(c.pins):
+            x0 = col * cw
+            cell = QRectF(x0, top, cw, full_h)
+            has_term = bool(c.pin_terminal(pin))
+            explicit = pin.terminal.strip() not in ("", "-")
+            if col % 2:
+                p.fillRect(cell, QColor(0, 0, 0, 12) if PRINT_MODE
+                           else QColor(255, 255, 255, 14))
+            if not has_term:
+                p.fillRect(cell, QColor(0, 0, 0, 16) if PRINT_MODE
+                           else QColor(0, 0, 0, 30))
+            elif explicit:
+                p.fillRect(cell, QColor(200, 169, 96, 38))
+            if col:
+                p.setPen(QPen(_ink("#0d1b22", "#37474f"), 0.5))
+                p.drawLine(QPointF(x0, top), QPointF(x0, top + full_h))
+            # número
+            p.setPen(_ink("#eceff1" if has_term else "#546e7a", "#1b2730"))
+            p.drawText(QRectF(x0, num_y, cw, PIN_H), Qt.AlignCenter, pin.number)
+            # nombre en vertical (rotado) si lo hay; recortado a su celda para
+            # que NUNCA invada el encabezado ni la columna vecina
+            if pin.name and name_h > 0:
+                p.save()
+                p.setClipRect(QRectF(x0, name_y, cw, name_h))
+                p.translate(x0 + cw / 2, name_y + name_h / 2)
+                p.rotate(-90)
+                p.setPen(_ink("#80deea" if has_term else "#455a64",
+                              "#00695c" if has_term else "#5a6b73"))
+                # rect un poco menor que la banda: deja margen con el borde
+                p.drawText(QRectF(-name_h / 2 + 2, -cw / 2, name_h - 4, cw),
+                           Qt.AlignCenter, pin.name)
+                p.restore()
 
     def paint(self, p, option, widget=None):
         c = self.connector
@@ -318,7 +399,7 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
         p.setBrush(QBrush(QColor("#ffffff") if PRINT_MODE else base.darker(115)))
         p.drawRoundedRect(body, 6, 6)
 
-        pm = _pixmap(c.image)
+        pm = _inst_pixmap(c)
         if pm:
             _draw_image_band(p, pm, QRectF(1, HEADER_H, w - 2, IMAGE_BAND))
 
@@ -327,6 +408,10 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
         top = self.content_top()
         # en impresion el texto va en negrita para que se lea/imprima mejor
         f = QFont(); f.setPointSize(8); f.setBold(PRINT_MODE); p.setFont(f)
+        if self._horizontal():
+            self._paint_pin_columns(p, w, top)
+            _paint_selection(p, self, body)
+            return
         left_side = c.side == "left"
         for row, pin in enumerate(c.pins):
             y = top + row * PIN_H
@@ -398,7 +483,7 @@ class CableItem(_NodeMixin, QGraphicsObject):
         self._build_ports()
 
     def content_top(self):
-        return HEADER_H + _band_h(_pixmap(self.cable.image))
+        return HEADER_H + _band_h(_inst_pixmap(self.cable))
 
     def _first_port_offset(self):
         return self.content_top() + PIN_H / 2
@@ -453,7 +538,7 @@ class CableItem(_NodeMixin, QGraphicsObject):
         p.setBrush(QBrush(_ink("#212b33", "#ffffff")))
         p.drawRoundedRect(body, 6, 6)
 
-        pm = _pixmap(cab.image)
+        pm = _inst_pixmap(cab)
         if pm:
             _draw_image_band(p, pm, QRectF(1, HEADER_H, w - 2, IMAGE_BAND))
 
@@ -542,7 +627,7 @@ class TerminalItem(_NodeMixin, QGraphicsObject):
         p.setPen(QPen(_ink("#0d1b22", "#37474f"), 1.5))
         p.setBrush(QBrush(_ink(accent.darker(130), "#ffffff")))
         p.drawRoundedRect(body, 4, 4)
-        pm = _pixmap(t.image)
+        pm = _inst_pixmap(t)
         if t.orientation == "v":
             self._paint_v(p, body, pm, accent)
         else:

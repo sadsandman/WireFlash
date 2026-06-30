@@ -23,12 +23,17 @@ from .harness import Cable, Connector, Pin, Terminal
 
 _FROZEN = getattr(sys, "frozen", False)
 _PKG_DIR = os.path.dirname(__file__)
-# este modulo vive en model/: anclar rutas al paquete de nivel superior
+# Este módulo vive en un subpaquete (model/), así que anclamos las rutas al
+# paquete de nivel superior (rapidharness/) subiendo tantos niveles como
+# puntos tenga __package__ ("rapidharness.model" -> 1).
 _TOP_PKG_DIR = _PKG_DIR
 for _ in range((__package__ or "").count(".")):
     _TOP_PKG_DIR = os.path.dirname(_TOP_PKG_DIR)
+# nombre del paquete (rapidharness / wireflash): sirve para el data dir
+# empaquetado y para la carpeta de datos de usuario, sin fijar la marca.
 _PKG_NAME = (__package__ or os.path.basename(_TOP_PKG_DIR)).split(".")[0]
 
+# --- datos de fabrica (libreria estandar): empaquetados con la app ---
 if _FROZEN and hasattr(sys, "_MEIPASS"):
     _DATA_DIR = os.path.join(sys._MEIPASS, _PKG_NAME, "data")
 else:
@@ -100,6 +105,90 @@ def resolve_image(image: str, base_dir: str) -> str:
 
 
 # ===================================================================
+#  Registro de librerías (nickname -> carpeta) estilo KiCad
+# ===================================================================
+# Mantiene el mapa de las librerías cargadas en la sesión para resolver las
+# imágenes de las instancias por NICKNAME (no por ruta absoluta), de modo que un
+# proyecto/ensamblaje sea portable entre PCs: basta tener una librería con el
+# mismo nombre cargada.
+_LIBRARY_REGISTRY: dict[str, str] = {}
+# Carpeta del proyecto abierto: permite que la resolución de imágenes caiga al
+# caché del proyecto (<project>/cache/<nickname>/) aunque la librería no esté.
+_PROJECT_DIR: str = ""
+
+
+def set_project_dir(path: str) -> None:
+    """Fija la carpeta del proyecto abierto (para el caché de imágenes)."""
+    global _PROJECT_DIR
+    _PROJECT_DIR = path or ""
+
+
+def register_libraries(libs) -> None:
+    """Reconstruye el registro nickname -> carpeta a partir de las librerías
+    cargadas. El primer nickname gana (la estándar/embebida tiene prioridad)."""
+    _LIBRARY_REGISTRY.clear()
+    for lib in libs:
+        if lib.name and lib.directory:
+            _LIBRARY_REGISTRY.setdefault(lib.name, os.path.abspath(lib.directory))
+
+
+def library_directory(nickname: str) -> str | None:
+    """Carpeta de la librería con ese nickname, o None si no está cargada."""
+    return _LIBRARY_REGISTRY.get(nickname)
+
+
+def resolve_instance_image(library: str, image: str, project_dir: str = "") -> str:
+    """Resuelve la imagen de una INSTANCIA a una ruta absoluta usable.
+
+    Orden de resolución:
+      1. Ruta absoluta (compatibilidad con archivos antiguos): se respeta.
+      2. Relativa al nickname ``library`` registrado en esta sesión.
+      3. Caché del proyecto: ``<project_dir>/cache/<library>/<image>``.
+      4. Cualquier librería cargada que contenga esa ruta relativa (red de
+         seguridad).
+    Devuelve "" si no se encuentra.
+    """
+    if not image:
+        return ""
+    if os.path.isabs(image):
+        return image
+    d = library_directory(library)
+    if d:
+        p = os.path.normpath(os.path.join(d, image))
+        if os.path.exists(p):
+            return p
+    proj = project_dir or _PROJECT_DIR
+    if proj:
+        p = os.path.normpath(os.path.join(proj, "cache", library, image))
+        if os.path.exists(p):
+            return p
+    for dirpath in _LIBRARY_REGISTRY.values():
+        p = os.path.normpath(os.path.join(dirpath, image))
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def package_image_into_project(library: str, image: str, project_dir: str) -> bool:
+    """Copia una imagen de instancia (relativa+nickname) al caché del proyecto:
+    ``<project_dir>/cache/<library>/<image>``. Así el proyecto abre con sus
+    imágenes en otra PC aunque NO tenga la librería instalada (empaquetado
+    OPCIONAL, estilo "archivar proyecto" de KiCad). Devuelve True si la imagen
+    quedó disponible en el caché."""
+    if not image or os.path.isabs(image) or not project_dir:
+        return False
+    src = resolve_instance_image(library, image, project_dir)
+    if not src or not os.path.exists(src):
+        return False
+    dst = os.path.normpath(os.path.join(project_dir, "cache", library, image))
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return True
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+    return True
+
+
+# ===================================================================
 #  Plantillas
 # ===================================================================
 @dataclass
@@ -120,6 +209,7 @@ class Part:
     params: dict = field(default_factory=dict)  # parámetros personalizados (clave->valor)
     field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""                       # archivo del que proviene (para reescribir)
+    library: str = ""                           # nickname de la librería (se asigna al cargar)
 
     kind = "connector"
 
@@ -135,7 +225,7 @@ class Part:
         return Connector(
             ref=ref, sku=self.sku, part_number=self.part_number,
             manufacturer=self.manufacturer, description=self.description,
-            color=self.color, image=self.image_abs(), x=x, y=y,
+            color=self.color, image=self.image, library=self.library, x=x, y=y,
             terminal=self.terminal, terminal_desc=self.terminal_desc,
             pins=[Pin(number=n) for n in self.pins],
             params=dict(self.params),
@@ -191,6 +281,7 @@ class CablePart:
     params: dict = field(default_factory=dict)   # parámetros personalizados
     field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""
+    library: str = ""                            # nickname de la librería (se asigna al cargar)
 
     kind = "cable"
 
@@ -215,7 +306,7 @@ class CablePart:
             manufacturer=self.manufacturer, description=self.description,
             cable_type=self.cable_type, gauge=self.gauge,
             conductor_colors=list(self.conductor_colors),
-            image=self.image_abs(), length_mm=length_mm, x=x, y=y,
+            image=self.image, library=self.library, length_mm=length_mm, x=x, y=y,
             params=dict(self.params),
         )
 
@@ -262,6 +353,7 @@ class TerminalPart:
     params: dict = field(default_factory=dict)        # parámetros personalizados
     field_labels: dict = field(default_factory=dict)  # etiquetas renombradas de campos fijos
     source_path: str = ""
+    library: str = ""                                 # nickname de la librería (se asigna al cargar)
 
     kind = "terminal"
 
@@ -277,7 +369,8 @@ class TerminalPart:
         return Terminal(
             ref=ref, sku=self.sku, part_number=self.part_number,
             manufacturer=self.manufacturer, description=self.description,
-            image=self.image_abs(), orientation=self.orientation, x=x, y=y,
+            image=self.image, library=self.library,
+            orientation=self.orientation, x=x, y=y,
         )
 
     def to_dict(self) -> dict:
@@ -388,11 +481,15 @@ class ComponentLibrary:
             except Exception:
                 continue
             if d.get("kind") == "cable" or "conductor_colors" in d:
-                lib.cables.append(CablePart.from_dict(d, path))
+                comp = CablePart.from_dict(d, path)
+                lib.cables.append(comp)
             elif d.get("kind") == "terminal":
-                lib.terminals.append(TerminalPart.from_dict(d, path))
+                comp = TerminalPart.from_dict(d, path)
+                lib.terminals.append(comp)
             else:
-                lib.connectors.append(Part.from_dict(d, path))
+                comp = Part.from_dict(d, path)
+                lib.connectors.append(comp)
+            comp.library = lib.name      # nickname de origen (para resolver imágenes)
         return lib
 
     @classmethod
@@ -406,6 +503,7 @@ class ComponentLibrary:
     def save_component(self, comp) -> str:
         """Escribe (o reescribe) el archivo individual del componente."""
         os.makedirs(self.directory, exist_ok=True)
+        comp.library = self.name     # asegura el nickname para instanciar al vuelo
         path = comp.source_path or self._path_for(comp)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(comp.to_dict(), f, indent=2, ensure_ascii=False)
@@ -562,3 +660,148 @@ def import_library_folder(src_dir: str, root: str | None = None) -> "ComponentLi
         n += 1
     shutil.copytree(src_dir, dst)
     return ComponentLibrary.load(dst, name=os.path.basename(dst))
+
+
+# ===================================================================
+#  Tabla de librerías estilo KiCad (nickname -> ruta)
+# ===================================================================
+# Archivo ``librerias.tbl`` (JSON) que mapea un APODO (nickname) explícito a una
+# ruta. Existe a dos niveles: GLOBAL (junto a ``librerias/``) y POR PROYECTO
+# (dentro de la carpeta del proyecto). Permite que una librería viva en
+# CUALQUIER carpeta —con cualquier nombre— y se referencie por su apodo, así un
+# proyecto copiado a otra PC se resuelve aunque allí la carpeta tenga otro
+# nombre o esté en otra ruta. Soporta variables: ``${PROJ}`` (carpeta del
+# proyecto), ``${LIBS}`` (raíz de librerías) y ``~`` (home); las rutas relativas
+# se anclan a la ubicación del propio .tbl (o a la carpeta del proyecto).
+LIBRARY_TABLE_NAME = "librerias.tbl"
+
+
+def resolve_table_path(path: str, base_dir: str = "", project_dir: str = "") -> str:
+    """Resuelve la ruta de una entrada de tabla a ruta absoluta normalizada."""
+    if not path:
+        return ""
+    s = path
+    home = os.path.expanduser("~")
+    for token, value in (("${PROJ}", project_dir), ("${LIBS}", LIBRARIES_ROOT),
+                         ("${HOME}", home)):
+        if value:
+            s = s.replace(token, value)
+    s = os.path.expanduser(s)
+    if not os.path.isabs(s):
+        anchor = base_dir or project_dir
+        if anchor:
+            s = os.path.join(anchor, s)
+    return os.path.normpath(s)
+
+
+def portable_table_path(abs_path: str, project_dir: str = "",
+                        libs_root: str | None = None) -> str:
+    """Convierte una ruta absoluta a una forma PORTABLE para guardar en la
+    tabla: ``${PROJ}/…`` si cuelga del proyecto, ``${LIBS}/…`` si cuelga de la
+    raíz de librerías; si no, la ruta absoluta tal cual."""
+    libs_root = libs_root if libs_root is not None else LIBRARIES_ROOT
+    ap = os.path.abspath(abs_path)
+    if project_dir:
+        pj = os.path.abspath(project_dir)
+        if ap == pj or ap.startswith(pj + os.sep):
+            rel = os.path.relpath(ap, pj).replace(os.sep, "/")
+            return "${PROJ}/" + rel if rel != "." else "${PROJ}"
+    lr = os.path.abspath(libs_root)
+    if ap == lr or ap.startswith(lr + os.sep):
+        rel = os.path.relpath(ap, lr).replace(os.sep, "/")
+        return "${LIBS}/" + rel if rel != "." else "${LIBS}"
+    return ap
+
+
+@dataclass
+class LibraryEntry:
+    nickname: str
+    path: str          # puede contener ${PROJ}/${LIBS}/~ o ser relativa
+
+    def to_dict(self) -> dict:
+        return {"nickname": self.nickname, "path": self.path}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LibraryEntry":
+        return cls(nickname=d.get("nickname", ""), path=d.get("path", ""))
+
+
+class LibraryTable:
+    """Tabla de librerías: lista ordenada de ``LibraryEntry`` (apodo -> ruta)."""
+
+    def __init__(self, entries: list[LibraryEntry] | None = None,
+                 source_path: str = "") -> None:
+        self.entries: list[LibraryEntry] = entries or []
+        self.source_path = source_path
+
+    # ----- carga / guardado ------------------------------------------
+    @classmethod
+    def load(cls, path: str) -> "LibraryTable":
+        t = cls(source_path=path)
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    d = json.load(f)
+                t.entries = [LibraryEntry.from_dict(e)
+                             for e in d.get("libraries", [])]
+            except Exception:
+                pass
+        return t
+
+    def save(self, path: str | None = None) -> str:
+        path = path or self.source_path
+        if not path:
+            raise ValueError("LibraryTable.save necesita una ruta")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1,
+                       "libraries": [e.to_dict() for e in self.entries]},
+                      f, indent=2, ensure_ascii=False)
+        self.source_path = path
+        return path
+
+    # ----- edición ----------------------------------------------------
+    def find(self, nickname: str) -> LibraryEntry | None:
+        return next((e for e in self.entries if e.nickname == nickname), None)
+
+    def add(self, nickname: str, path: str) -> None:
+        """Agrega o REEMPLAZA la entrada con ese apodo."""
+        e = self.find(nickname)
+        if e:
+            e.path = path
+        else:
+            self.entries.append(LibraryEntry(nickname, path))
+
+    def remove(self, nickname: str) -> None:
+        self.entries = [e for e in self.entries if e.nickname != nickname]
+
+    # ----- resolución -------------------------------------------------
+    def resolved(self, project_dir: str = "") -> list[tuple[str, str]]:
+        """Lista ``(apodo, carpeta_absoluta)`` resolviendo variables/relativas."""
+        base = os.path.dirname(self.source_path) if self.source_path else ""
+        out: list[tuple[str, str]] = []
+        for e in self.entries:
+            if not e.nickname:
+                continue
+            out.append((e.nickname,
+                        resolve_table_path(e.path, base_dir=base,
+                                           project_dir=project_dir)))
+        return out
+
+
+def global_table_path() -> str:
+    return os.path.join(_PROJECT_ROOT, LIBRARY_TABLE_NAME)
+
+
+def project_table_path(project_dir: str) -> str:
+    return os.path.join(project_dir, LIBRARY_TABLE_NAME) if project_dir else ""
+
+
+def load_global_table() -> "LibraryTable":
+    return LibraryTable.load(global_table_path())
+
+
+def load_project_table(project_dir: str) -> "LibraryTable":
+    if not project_dir:
+        return LibraryTable()
+    return LibraryTable.load(project_table_path(project_dir))

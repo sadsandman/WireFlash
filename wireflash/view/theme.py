@@ -134,6 +134,23 @@ def save_scale(s: float) -> None:
     _settings().setValue("graphics_scale", float(s))
 
 
+# --- tamaño de letra de los reportes (BOM / corte / netlist) -------------
+DEFAULT_REPORT_PT = 9
+MIN_REPORT_PT, MAX_REPORT_PT = 7, 20
+
+
+def saved_report_pt() -> int:
+    try:
+        v = int(_settings().value("report_font_pt", DEFAULT_REPORT_PT))
+    except (TypeError, ValueError):
+        v = DEFAULT_REPORT_PT
+    return min(MAX_REPORT_PT, max(MIN_REPORT_PT, v))
+
+
+def save_report_pt(v: int) -> None:
+    _settings().setValue("report_font_pt", int(v))
+
+
 # --- rutas de librerías externas (gestor de librerías) -------------------
 def saved_library_paths() -> list[str]:
     raw = _settings().value("library_paths", "")

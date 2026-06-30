@@ -76,7 +76,8 @@ class Connector:
     x: float = 0.0
     y: float = 0.0
     side: str = "right"                  # salida de cables: left|right|top|bottom
-    image: str = ""
+    image: str = ""                      # ruta RELATIVA a la librería de origen (o absoluta: legado)
+    library: str = ""                    # nickname de la librería de origen (resolución portable)
     terminal: str = ""                   # PN del terminal/contacto por defecto
     terminal_desc: str = ""              # descripcion (p.ej. "tubular size 16", "herradura")
     pins: list[Pin] = field(default_factory=list)
@@ -85,6 +86,23 @@ class Connector:
 
     def pin_by_id(self, pin_id: str) -> Optional[Pin]:
         return next((p for p in self.pins if p.id == pin_id), None)
+
+    def resync_pins(self, numbers: list[str]) -> bool:
+        """Ajusta los pines a la lista de números dada, PRESERVANDO los Pin
+        existentes por posición (conserva id/name/terminal, así no se rompen las
+        conexiones cuyo índice siga existiendo). Si crece, agrega pines nuevos;
+        si encoge, los pines sobrantes desaparecen (sus conexiones quedan
+        huérfanas y deben limpiarse con ``Harness.prune_orphan_wires``).
+        Devuelve True si cambió la cantidad de pines."""
+        old = self.pins
+        new: list[Pin] = []
+        for i, num in enumerate(numbers):
+            p = old[i] if i < len(old) else Pin(number=str(num))
+            p.number = str(num)
+            new.append(p)
+        changed = len(new) != len(old)
+        self.pins = new
+        return changed
 
     def pin_terminal(self, pin: Pin) -> str:
         """Terminal efectivo: '-' = sin terminal; vacío = hereda del conector."""
@@ -132,7 +150,8 @@ class Cable:
     length_mm: float = 0.0
     x: float = 0.0
     y: float = 0.0
-    image: str = ""
+    image: str = ""                       # ruta RELATIVA a la librería (o absoluta: legado)
+    library: str = ""                     # nickname de la librería de origen
     params: dict = field(default_factory=dict)   # parámetros personalizados
     id: str = field(default_factory=_new_id)
 
@@ -170,7 +189,8 @@ class Terminal:
     part_number: str = ""
     manufacturer: str = ""
     description: str = ""
-    image: str = ""
+    image: str = ""                       # ruta RELATIVA a la librería (o absoluta: legado)
+    library: str = ""                     # nickname de la librería de origen
     orientation: str = "h"    # "h" horizontal | "v" vertical
     x: float = 0.0
     y: float = 0.0
@@ -388,6 +408,43 @@ class Harness:
 
     def node_by_id(self, node_id: str):
         return self.connector_by_id(node_id) or self.cable_by_id(node_id) or self.terminal_by_id(node_id)
+
+    def valid_ports_for(self, node) -> Optional[set[str]]:
+        """Puertos válidos de un nodo. Devuelve None cuando el nodo no acota sus
+        puertos (terminal: cualquier puerto es válido)."""
+        if isinstance(node, Connector):
+            return {p.id for p in node.pins}
+        if isinstance(node, Cable):
+            ports: set[str] = set()
+            for i in range(node.conductor_count):
+                ports.add(f"{i}:L")
+                ports.add(f"{i}:R")
+            return ports
+        return None
+
+    def prune_orphan_wires(self) -> int:
+        """Elimina las conexiones cuyos extremos apunten a un nodo inexistente o
+        a un puerto que ya no existe (p.ej. tras reducir pines/conductores).
+        Devuelve cuántas se eliminaron."""
+        keep: list[Wire] = []
+        removed = 0
+        for w in self.wires:
+            ok = True
+            for ep in (w.a, w.b):
+                node = self.node_by_id(ep.node)
+                if node is None:
+                    ok = False
+                    break
+                valid = self.valid_ports_for(node)
+                if valid is not None and ep.port not in valid:
+                    ok = False
+                    break
+            if ok:
+                keep.append(w)
+            else:
+                removed += 1
+        self.wires = keep
+        return removed
 
     # ----- cables (segmentos) ----------------------------------------
     def add_wire(self, w: Wire) -> Wire:

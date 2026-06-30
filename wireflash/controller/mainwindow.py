@@ -7,7 +7,8 @@ import uuid
 
 from PySide6.QtCore import QByteArray, QMimeData, QSize, Qt, QTimer
 from PySide6.QtGui import (
-    QAction, QActionGroup, QBrush, QColor, QCursor, QDrag, QIcon, QKeySequence)
+    QAction, QActionGroup, QBrush, QColor, QCursor, QDrag, QFont, QIcon,
+    QKeySequence)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -36,10 +38,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..view import icons
-from ..view import items
 from . import pdf_export as pdfexport
 from ..model import reports
+from ..view import icons
+from ..view import items
+from ..view import theme
 from ..view.dialogs import (
     AssemblyBlockDialog,
     ComponentEditorDialog,
@@ -59,6 +62,14 @@ from ..model.library import (
     ensure_assemblies_root,
     ensure_libraries_root,
     import_library_folder,
+    package_image_into_project,
+    register_libraries,
+    set_project_dir,
+    LibraryTable,
+    load_global_table,
+    load_project_table,
+    project_table_path,
+    portable_table_path,
 )
 from ..view.items import CableItem, ConnectorItem, NoteItem, TerminalItem
 from ..model import (
@@ -66,7 +77,6 @@ from ..model import (
     PROJECT_EXT, Terminal, WIRE_COLORS, Wire)
 from ..view.scene import HarnessScene
 from ..view.canvas import HarnessView
-from ..view import theme
 
 SIDE_LABELS = [("Derecha", "right"), ("Izquierda", "left"),
                ("Arriba", "top"), ("Abajo", "bottom")]
@@ -278,6 +288,7 @@ class MainWindow(QMainWindow):
         ensure_libraries_root()
         ensure_assemblies_root()
         self.library_paths: list[str] = theme.saved_library_paths()
+        self._report_pt: int = theme.saved_report_pt()
         self.libraries: list[ComponentLibrary] = []
         self._load_all_libraries()
         self.project = Project("Proyecto sin titulo")
@@ -365,7 +376,7 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         self._snap_timer.stop()
-        self._commit_snapshot()
+        self._commit_snapshot()        # captura cualquier cambio pendiente
         if not self._undo:
             self.statusBar().showMessage("Nada que deshacer", 2000)
             return
@@ -611,10 +622,47 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.bom_table, "BOM")
         self.tabs.addTab(self.cut_table, "Tabla de corte")
         self.tabs.addTab(self.net_table, "Netlist")
+
+        # barra superior: control de tamaño de letra de los reportes (sobre todo
+        # para el BOM, donde a veces el texto no se alcanza a leer).
+        bar = QWidget()
+        hb = QHBoxLayout(bar)
+        hb.setContentsMargins(6, 2, 6, 2)
+        hb.addWidget(QLabel("Texto:"))
+        self.report_pt_spin = QSpinBox()
+        self.report_pt_spin.setRange(theme.MIN_REPORT_PT, theme.MAX_REPORT_PT)
+        self.report_pt_spin.setValue(self._report_pt)
+        self.report_pt_spin.setSuffix(" pt")
+        self.report_pt_spin.setToolTip("Tamaño de letra de las tablas de reporte")
+        self.report_pt_spin.valueChanged.connect(self._set_report_pt)
+        hb.addWidget(self.report_pt_spin)
+        hb.addStretch(1)
+
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(bar)
+        v.addWidget(self.tabs)
+
         dock = QDockWidget("Reportes", self)
-        dock.setWidget(self.tabs)
+        dock.setWidget(wrap)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.resizeDocks([self._props_dock, dock], [360, 500], Qt.Vertical)
+        self._apply_report_font()
+
+    def _apply_report_font(self) -> None:
+        f = QFont()
+        f.setPointSize(self._report_pt)
+        for t in (self.bom_table, self.cut_table, self.net_table):
+            t.setFont(f)
+            t.resizeColumnsToContents()
+            t.resizeRowsToContents()
+
+    def _set_report_pt(self, pt: int) -> None:
+        self._report_pt = int(pt)
+        theme.save_report_pt(self._report_pt)
+        self._apply_report_font()
 
     # ----- toolbar / menu --------------------------------------------
     def _build_toolbar(self) -> None:
@@ -628,8 +676,16 @@ class MainWindow(QMainWindow):
                         "Abrir proyecto / arnés")
         self._tb_action(tb, icons.save_icon(), "Guardar", self.save_file,
                         "Guardar proyecto (Ctrl+S)")
+        self._tb_action(tb, icons.preview_icon(), "Vista previa",
+                        self.preview_assembly_pdf,
+                        "Vista previa de impresión")
         self._tb_action(tb, icons.pdf_icon(), "PDF", self.export_assembly_pdf,
                         "Exportar ensamblaje a PDF")
+        tb.addSeparator()
+        self._tb_action(tb, icons.sync_icon(), "Actualizar",
+                        self.update_from_libraries,
+                        "Actualizar componentes desde las librerías "
+                        "(pines, imágenes, catálogo)")
         tb.addSeparator()
         self._tb_action(tb, icons.flip_h_icon(), "Voltear H",
                         self.flip_selected_h,
@@ -697,6 +753,8 @@ class MainWindow(QMainWindow):
         # exportar agrupado: PDF + CSV
         ex = m.addMenu("Exportar")
         pdf = ex.addMenu("PDF (BOM + diagrama)")
+        self._act(pdf, "Vista previa de impresión…", None,
+                  self.preview_assembly_pdf)
         self._act(pdf, "Proyecto completo…", None, self.export_project_pdf)
         self._act(pdf, "Ensamblaje actual… (imprimir)", QKeySequence.Print,
                   self.export_assembly_pdf)
@@ -760,8 +818,16 @@ class MainWindow(QMainWindow):
         lib.addSeparator()
         self._act(lib, "Nueva librería…", None, self.new_library)
         self._act(lib, "Importar librería (carpeta)…", None, self.import_library)
+        self._act(lib, "Agregar librería con apodo (tabla)…", None,
+                  self.add_library_with_nickname)
+        self._act(lib, "Guardar tabla de librerías en el proyecto…", None,
+                  self.save_library_table_to_project)
         self._act(lib, "Nuevo componente…", None, self.open_component_editor)
         lib.addSeparator()
+        self._act(lib, "Actualizar componentes desde librerías…", None,
+                  self.update_from_libraries)
+        self._act(lib, "Empaquetar imágenes en el proyecto (portátil)…", None,
+                  self.package_project_images)
         self._act(lib, "Abrir carpeta de librerías…", None, self.reveal_libraries_root)
 
         v = self.menuBar().addMenu("&Ver")
@@ -935,24 +1001,59 @@ class MainWindow(QMainWindow):
                 f"«{pn}» no está en una librería cargada; no se puede editar.")
 
     # ----- librerias --------------------------------------------------
+    def _project_dir(self) -> str:
+        """Carpeta del proyecto abierto (para tabla por proyecto y caché)."""
+        path = getattr(self, "current_path", None)
+        if path and os.path.splitext(path)[1].lower() == PROJECT_EXT:
+            return os.path.dirname(path)
+        return ""
+
     def _load_all_libraries(self) -> None:
-        """Reconstruye self.libraries: estándar embebida + carpeta ``librerias/``
-        + cada ruta externa guardada en el gestor de librerías."""
-        libs: list[ComponentLibrary] = (
-            [ComponentLibrary.load_builtin()] + discover_libraries())
-        seen = {os.path.abspath(l.directory) for l in libs if l.directory}
+        """Reconstruye self.libraries en este orden de PRIORIDAD de apodo:
+        estándar embebida → tabla del PROYECTO → tabla GLOBAL → rutas heredadas
+        del gestor → autodescubrimiento de ``librerias/``. El primer apodo gana,
+        así la tabla del proyecto manda sobre el autodescubrimiento."""
+        builtin = ComponentLibrary.load_builtin()
+        libs: list[ComponentLibrary] = [builtin]
+        seen_dirs: set[str] = (
+            {os.path.abspath(builtin.directory)} if builtin.directory else set())
+        seen_nicks: set[str] = {builtin.name}
+        proj_dir = self._project_dir()
+
+        # entradas con apodo EXPLÍCITO: proyecto (prioridad) + global
+        entries: list[tuple[str, str]] = []
+        if proj_dir:
+            entries += load_project_table(proj_dir).resolved(proj_dir)
+        entries += load_global_table().resolved(proj_dir)
+        # compat: rutas heredadas sin apodo (apodo = nombre de carpeta)
         for p in self.library_paths:
-            if not os.path.isdir(p):
+            entries.append(
+                (os.path.basename(os.path.abspath(p.rstrip("/\\"))), p))
+
+        for nick, d in entries:
+            if not nick or not d or not os.path.isdir(d):
                 continue
-            ap = os.path.abspath(p)
-            if ap in seen:
+            ap = os.path.abspath(d)
+            if ap in seen_dirs or nick in seen_nicks:
                 continue
             try:
-                libs.append(ComponentLibrary.load(p))
-                seen.add(ap)
+                libs.append(ComponentLibrary.load(d, name=nick))
+                seen_dirs.add(ap)
+                seen_nicks.add(nick)
             except Exception:
                 pass
+
+        # autodescubrimiento de la carpeta estándar ``librerias/``
+        for lib in discover_libraries():
+            ap = os.path.abspath(lib.directory)
+            if ap in seen_dirs or lib.name in seen_nicks:
+                continue
+            libs.append(lib)
+            seen_dirs.add(ap)
+            seen_nicks.add(lib.name)
+
         self.libraries = libs
+        register_libraries(libs)   # mapa nickname->carpeta para resolver imágenes
         if hasattr(self, "part_tree"):
             self.part_tree.libraries = self.libraries
             self.part_tree.populate()
@@ -969,11 +1070,62 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Librerías recargadas ({len(self.libraries)} en total)", 5000)
 
+    def add_library_with_nickname(self):
+        """Agrega una librería a la tabla GLOBAL con un apodo explícito (estilo
+        KiCad): la carpeta puede llamarse distinto al apodo y vivir donde sea."""
+        d = QFileDialog.getExistingDirectory(
+            self, "Carpeta de la librería (cualquier ubicación)")
+        if not d:
+            return
+        default = os.path.basename(d.rstrip("/\\")) or "Librería"
+        nick, ok = QInputDialog.getText(
+            self, "Apodo de la librería",
+            "Apodo (nickname) con el que se referenciará en los proyectos:",
+            text=default)
+        if not ok or not nick.strip():
+            return
+        nick = nick.strip()
+        table = load_global_table()
+        table.add(nick, portable_table_path(d))
+        table.save()
+        self._load_all_libraries()
+        self.scene.rebuild()
+        self.statusBar().showMessage(
+            f"Librería «{nick}» agregada a la tabla global.", 5000)
+
+    def save_library_table_to_project(self):
+        """Escribe la tabla de librerías DENTRO de la carpeta del proyecto, con
+        rutas portables (${PROJ}/${LIBS}). Así el proyecto lleva consigo a qué
+        apodos resolver, aunque la otra PC tenga las carpetas en otro sitio."""
+        proj_dir = self._project_dir()
+        if not proj_dir:
+            QMessageBox.information(
+                self, "Tabla de librerías",
+                f"Primero guarda el proyecto como carpeta ({PROJECT_EXT}).\n\n"
+                f"La tabla por proyecto se guarda junto al {PROJECT_EXT}.")
+            return
+        table = LibraryTable(source_path=project_table_path(proj_dir))
+        builtin_name = ComponentLibrary.load_builtin().name
+        for lib in self.libraries:
+            if lib.name == builtin_name or not lib.directory:
+                continue   # la estándar va embebida; no se tabula
+            table.add(lib.name,
+                      portable_table_path(lib.directory, project_dir=proj_dir))
+        table.save()
+        QMessageBox.information(
+            self, "Tabla de librerías",
+            f"Tabla guardada en el proyecto ({len(table.entries)} librería/s):\n"
+            f"{table.source_path}\n\n"
+            "Al abrir el proyecto en otra PC, las librerías se resolverán por "
+            "apodo según esta tabla.")
+
     def load_library(self):
         d = QFileDialog.getExistingDirectory(self, "Carpeta de librería externa")
         if d:
             self.libraries.append(ComponentLibrary.load(d))
+            register_libraries(self.libraries)   # registra nickname->carpeta
             self.part_tree.populate()
+            self.scene.rebuild()                  # ya resuelve imágenes nuevas
             self.statusBar().showMessage(f"Librería cargada: {d}", 4000)
 
     def new_library(self):
@@ -1012,7 +1164,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo importar:\n{exc}")
             return
         self.libraries.append(lib)
+        register_libraries(self.libraries)   # registra nickname->carpeta
         self.part_tree.populate()
+        self.scene.rebuild()                  # resuelve ya las imágenes del proyecto
         self.statusBar().showMessage(
             f"Librería importada: {lib.name} ({len(lib)} componentes)", 5000)
 
@@ -1047,10 +1201,35 @@ class MainWindow(QMainWindow):
                 f"Componente actualizado en «{lib.name}» · "
                 f"{n} instancia(s) sincronizada(s).", 5000)
 
+    def _apply_part_to_instance(self, inst, part) -> None:
+        """Vuelca los valores de catalogo de un Part de libreria a una instancia.
+        Respeta los datos propios de la instancia (ref, posicion, longitud,
+        nombres de pin). La imagen se guarda RELATIVA + nickname (portable)."""
+        inst.sku = part.sku
+        inst.part_number = part.part_number
+        inst.manufacturer = part.manufacturer
+        inst.description = part.description
+        inst.image = part.image          # relativa a la librería (portable)
+        inst.library = getattr(part, "library", "")
+        inst.params = dict(getattr(part, "params", {}))
+        if part.kind == "connector":
+            inst.color = part.color
+            inst.terminal = part.terminal
+            inst.terminal_desc = part.terminal_desc
+            # resincroniza la cantidad y numeración de pines (preserva ids ⇒ no
+            # rompe conexiones cuyo índice siga existiendo). Las conexiones que
+            # queden huérfanas se limpian con Harness.prune_orphan_wires.
+            inst.resync_pins(list(part.pins))
+        elif part.kind == "cable":
+            inst.cable_type = part.cable_type
+            inst.gauge = part.gauge
+            inst.conductor_colors = list(part.conductor_colors)
+        elif part.kind == "terminal":
+            inst.orientation = part.orientation
+
     def _propagate_part_to_instances(self, part, old_pn: str) -> int:
-        """Vuelca los valores de catalogo del componente de libreria a las
-        instancias colocadas con el part number anterior. Respeta los datos
-        propios de la instancia (ref, posicion, longitud, nombres de pin)."""
+        """Vuelca los valores de catalogo a las instancias colocadas con el part
+        number anterior (en el ensamblaje activo)."""
         if part is None:
             return 0
         is_conn = part.kind == "connector"
@@ -1059,26 +1238,108 @@ class MainWindow(QMainWindow):
         for inst in pool:
             if inst.part_number != old_pn:
                 continue
-            inst.sku = part.sku
-            inst.part_number = part.part_number
-            inst.manufacturer = part.manufacturer
-            inst.description = part.description
-            inst.image = part.image_abs()
-            inst.params = dict(getattr(part, "params", {}))
-            if is_conn:
-                inst.color = part.color
-                inst.terminal = part.terminal
-                inst.terminal_desc = part.terminal_desc
-                if len(inst.pins) == len(part.pins):
-                    for pin, num in zip(inst.pins, part.pins):
-                        pin.number = num
-            else:
-                inst.cable_type = part.cable_type
-                inst.gauge = part.gauge
-                if len(inst.conductor_colors) == len(part.conductor_colors):
-                    inst.conductor_colors = list(part.conductor_colors)
+            self._apply_part_to_instance(inst, part)
             count += 1
+        if count:
+            self.harness.prune_orphan_wires()   # por si cambió la cantidad de pines
         return count
+
+    def _find_part_for(self, kind: str, library: str, part_number: str):
+        """Busca el Part de catalogo para una instancia. Prioriza la libreria
+        con el nickname indicado; si no, cae a cualquier libreria que tenga ese
+        part number (para instancias antiguas sin nickname)."""
+        if library:
+            for lib in self.libraries:
+                if lib.name == library:
+                    p = lib.find_part(kind, part_number)
+                    if p is not None:
+                        return p
+        for lib in self.libraries:
+            p = lib.find_part(kind, part_number)
+            if p is not None:
+                return p
+        return None
+
+    def update_from_libraries(self) -> None:
+        """Re-sincroniza TODAS las instancias del proyecto con las librerias
+        cargadas, emparejando por (nickname, part number). Util tras copiar el
+        proyecto a otra PC: migra imagenes a relativas y refresca catalogo."""
+        updated = 0
+        missing: set[str] = set()
+        pools = [("connector", lambda h: h.connectors),
+                 ("cable", lambda h: h.cables),
+                 ("terminal", lambda h: h.terminals)]
+        for h in self.project.assemblies:
+            for kind, getter in pools:
+                for inst in getter(h):
+                    pn = inst.part_number
+                    if not pn:
+                        continue
+                    part = self._find_part_for(
+                        kind, getattr(inst, "library", ""), pn)
+                    if part is None:
+                        missing.add(pn)
+                        continue
+                    self._apply_part_to_instance(inst, part)
+                    updated += 1
+            h.prune_orphan_wires()   # limpia conexiones rotas por cambios de pines
+        self.scene.rebuild()
+        self.refresh_reports()
+        msg = f"{updated} instancia(s) sincronizada(s) con las librerías."
+        if missing:
+            faltan = ", ".join(sorted(missing)[:8])
+            extra = "…" if len(missing) > 8 else ""
+            QMessageBox.information(
+                self, "Actualizar desde librerías",
+                f"{msg}\n\nNo se encontró en ninguna librería cargada "
+                f"({len(missing)} part number/s):\n{faltan}{extra}\n\n"
+                "Importa la librería correspondiente y vuelve a intentarlo.")
+        else:
+            self.statusBar().showMessage(msg, 6000)
+
+    def package_project_images(self) -> None:
+        """OPCIONAL: copia las imágenes usadas dentro de ``<proyecto>/cache`` para
+        que el proyecto abra en otra PC aunque no tenga las librerías. No se hace
+        al guardar; es una acción explícita ("archivar/empaquetar")."""
+        if (not self.current_path or
+                os.path.splitext(self.current_path)[1].lower() != PROJECT_EXT):
+            QMessageBox.information(
+                self, "Empaquetar imágenes",
+                f"Primero guarda el proyecto como carpeta ({PROJECT_EXT}).\n\n"
+                "El empaquetado copia las imágenes usadas dentro de la carpeta "
+                "del proyecto para que abra en otra PC sin tener las librerías.")
+            return
+        project_dir = os.path.dirname(self.current_path)
+        seen: set[tuple[str, str]] = set()
+        copied = 0
+        missing: set[str] = set()
+        for h in self.project.assemblies:
+            insts = list(h.connectors) + list(h.cables) + list(h.terminals)
+            for inst in insts:
+                lib = getattr(inst, "library", "")
+                img = getattr(inst, "image", "")
+                if not img or os.path.isabs(img):
+                    continue
+                key = (lib, img)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if package_image_into_project(lib, img, project_dir):
+                    copied += 1
+                else:
+                    missing.add(f"{lib}:{img}" if lib else img)
+        extra = ""
+        if missing:
+            faltan = ", ".join(sorted(missing)[:6])
+            mas = "…" if len(missing) > 6 else ""
+            extra = (f"\n\nNo se pudieron resolver {len(missing)} imagen(es) "
+                     f"(importa esas librerías y reintenta):\n{faltan}{mas}")
+        QMessageBox.information(
+            self, "Empaquetar imágenes",
+            f"Empaquetadas en «{os.path.basename(project_dir)}/cache»: "
+            f"{copied} imagen(es)." + (extra if extra else
+             "\n\nEl proyecto ahora abre con sus imágenes aunque la otra PC no "
+             "tenga las librerías."))
 
     def duplicate_library_component(self, lib, comp):
         if lib is None or comp is None:
@@ -1559,6 +1820,7 @@ class MainWindow(QMainWindow):
             for j, val in enumerate(row):
                 table.setItem(i, j, QTableWidgetItem(val))
         table.resizeColumnsToContents()
+        table.resizeRowsToContents()
 
     def _fill_bom(self, table, rows):
         headers = ["Categoría", "SKU", "Item", "Descripción", "Cant.", "Ud"]
@@ -1576,6 +1838,7 @@ class MainWindow(QMainWindow):
                     it.setBackground(sub_bg)
                 table.setItem(i, j, it)
         table.resizeColumnsToContents()
+        table.resizeRowsToContents()
 
     # ----- archivo ----------------------------------------------------
     def new_file(self):
@@ -1584,6 +1847,8 @@ class MainWindow(QMainWindow):
         self._active = 0
         self.harness = self.project.assemblies[0]
         self.current_path = None
+        set_project_dir("")
+        self._load_all_libraries()   # descarta la tabla por-proyecto anterior
         self._refresh_assembly_list()
         self._reload_scene()
 
@@ -1611,6 +1876,8 @@ class MainWindow(QMainWindow):
             self._active = 0
             self.harness = self.project.assemblies[0]
             self.current_path = path
+            set_project_dir(os.path.dirname(path))
+            self._load_all_libraries()   # aplica la tabla por-proyecto si existe
             self._refresh_assembly_list()
             self._reload_scene()
         except Exception as exc:
@@ -1662,6 +1929,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo guardar:\n{exc}")
             return
         self.current_path = path
+        set_project_dir(os.path.dirname(path))
         if os.path.splitext(path)[1].lower() == PROJECT_EXT:
             self.statusBar().showMessage(
                 f"Proyecto guardado en la carpeta: {os.path.dirname(path)}", 6000)
@@ -1804,12 +2072,13 @@ class MainWindow(QMainWindow):
         return {"project": self.project.name, "author": self.project.author,
                 "version": self.project.version, "logo": self.project.logo}
 
-    def _do_pdf(self, harnesses, suggested_name):
-        # el PDF hereda el tamaño/orientación de hoja configurados
+    def _pdf_options(self):
+        """Muestra el diálogo de opciones (tamaño/orientación/plantilla) y
+        devuelve ``(opciones, template)`` o ``None`` si se cancela."""
         opt = PdfExportDialog(self, page_name=self.page_name,
                               landscape=self.landscape)
         if not opt.exec():
-            return
+            return None
         o = opt.result_options()
         if o["svg_path"]:
             try:
@@ -1817,9 +2086,17 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self, "Error",
                                      f"No se pudo leer la plantilla SVG:\n{exc}")
-                return
+                return None
         else:
             template = FrameTemplate.generic(self.project.logo)
+        return o, template
+
+    def _do_pdf(self, harnesses, suggested_name):
+        # el PDF hereda el tamaño/orientación de hoja configurados
+        res = self._pdf_options()
+        if not res:
+            return
+        o, template = res
         path, _ = QFileDialog.getSaveFileName(
             self, "Exportar a PDF", suggested_name, "PDF (*.pdf)")
         if not path:
@@ -1834,6 +2111,22 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(
             f"PDF exportado ({len(harnesses)} ensamblaje/s): {path}", 6000)
+
+    def preview_assembly_pdf(self):
+        """Vista previa de impresión del ensamblaje activo (mismas páginas que
+        el PDF). Desde el diálogo se puede imprimir o guardar como PDF."""
+        res = self._pdf_options()
+        if not res:
+            return
+        o, template = res
+        try:
+            pdfexport.preview_pdf(
+                self, [self.harness], self._pdf_fields_base(),
+                page_name=o["page_name"], landscape=o["landscape"],
+                template=template)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error",
+                                 f"No se pudo previsualizar:\n{exc}")
 
     def _reload_scene(self):
         self._make_scene()

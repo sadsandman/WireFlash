@@ -123,48 +123,39 @@ def _draw_diagram(painter, h, content: QRectF, dpi: float,
     painter.restore()
 
 
-def export_pdf(assemblies, path: str, fields_base: dict, *,
-               page_name: str = "A4", landscape: bool = False,
-               template: FrameTemplate | None = None) -> None:
-    """Genera el PDF. ``fields_base`` lleva project/author/version (y opcional
-    logo); ``assembly``, ``page`` y ``pages`` los completa esta función."""
+def _render_to_device(device, assemblies, fields_base: dict, *,
+                      page_name: str, landscape: bool,
+                      template: FrameTemplate | None) -> None:
+    """Pinta todas las páginas (BOM + diagrama) en ``device`` (un QPdfWriter o
+    un QPrinter): así el PDF y la vista previa de impresión comparten el mismo
+    render. El llamador ya debe haber fijado tamaño/orientación de página."""
     template = template or FrameTemplate.generic(fields_base.get("logo", ""))
-
-    writer = QPdfWriter(path)
-    writer.setPageSize(QPageSize(PAGE_SIZES.get(page_name, QPageSize.A4)))
-    writer.setPageOrientation(
-        QPageLayout.Landscape if landscape else QPageLayout.Portrait)
-    writer.setPageMargins(QMarginsF(0, 0, 0, 0))
-    writer.setResolution(300)
-    dpi = writer.resolution()
-    page = QRectF(0, 0, writer.width(), writer.height())
+    dpi = device.resolution()
+    page = QRectF(0, 0, device.width(), device.height())
     content = template.content_rect(page, dpi)
 
     base = dict(fields_base)
     base.setdefault("date", date.today().isoformat())
 
     # descriptores de página: (nombre_ensamblaje, doc|None, idx_pag, harness|None)
-    #   1) BOM de compras (totales sumados) · 2) BOM de armado (qué va con qué,
-    #   terminales bajo su conector) · 3) diagrama.
+    #   1) BOM de compras (totales sumados) · 2) diagrama (con cajetín de armado).
     descriptors: list[tuple] = []
     for h in assemblies:
         compras = _bom_doc(h, content, reports.purchase_bom(h),
                            "Lista de materiales — Compras (totales)")
         for pi in range(max(1, compras.pageCount())):
             descriptors.append((h.name, compras, pi, None))
-        # el detalle "qué va con qué" (terminal↔conector) NO va como hoja
-        # aparte: se coloca como cajetín en la hoja del diagrama (ver NoteItem).
         descriptors.append((h.name, None, 0, h))
     total = len(descriptors)
 
-    painter = QPainter(writer)
+    painter = QPainter(device)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setRenderHint(QPainter.TextAntialiasing)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
     try:
         for idx, (aname, doc, pi, diagram_h) in enumerate(descriptors):
             if idx > 0:
-                writer.newPage()
+                device.newPage()
             fields = dict(base)
             fields.update(assembly=aname, page=idx + 1, pages=total)
             template.draw(painter, page, dpi, fields)
@@ -175,3 +166,46 @@ def export_pdf(assemblies, path: str, fields_base: dict, *,
                               f"{aname} — Diagrama")
     finally:
         painter.end()
+
+
+def _apply_page(device, page_name: str, landscape: bool) -> None:
+    device.setPageSize(QPageSize(PAGE_SIZES.get(page_name, QPageSize.A4)))
+    device.setPageOrientation(
+        QPageLayout.Landscape if landscape else QPageLayout.Portrait)
+    device.setPageMargins(QMarginsF(0, 0, 0, 0))
+
+
+def export_pdf(assemblies, path: str, fields_base: dict, *,
+               page_name: str = "A4", landscape: bool = False,
+               template: FrameTemplate | None = None) -> None:
+    """Genera el PDF. ``fields_base`` lleva project/author/version (y opcional
+    logo); ``assembly``, ``page`` y ``pages`` los completa esta función."""
+    writer = QPdfWriter(path)
+    _apply_page(writer, page_name, landscape)
+    writer.setResolution(300)
+    _render_to_device(writer, assemblies, fields_base,
+                       page_name=page_name, landscape=landscape,
+                       template=template)
+
+
+def preview_pdf(parent, assemblies, fields_base: dict, *,
+                page_name: str = "A4", landscape: bool = False,
+                template: FrameTemplate | None = None) -> None:
+    """Abre una vista previa de impresión (mismas páginas que el PDF). Desde el
+    diálogo se puede imprimir o guardar como PDF con el botón de impresora."""
+    from PySide6.QtPrintSupport import QPrinter, QPrintPreviewDialog
+
+    printer = QPrinter(QPrinter.HighResolution)
+    _apply_page(printer, page_name, landscape)
+
+    dlg = QPrintPreviewDialog(printer, parent)
+    dlg.setWindowTitle("Vista previa de impresión")
+    dlg.paintRequested.connect(
+        lambda pr: _render_to_device(pr, assemblies, fields_base,
+                                     page_name=page_name, landscape=landscape,
+                                     template=template))
+    try:
+        dlg.resize(int(parent.width() * 0.8), int(parent.height() * 0.85))
+    except Exception:
+        pass
+    dlg.exec()

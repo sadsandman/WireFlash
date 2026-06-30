@@ -85,6 +85,25 @@ def pdf_icon() -> QIcon:
     return _make(d)
 
 
+# --- vista previa de impresión -------------------------------------------
+def preview_icon() -> QIcon:
+    def d(p):
+        # hoja
+        p.setPen(QPen(QColor("#455a64"), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(QBrush(QColor("#eceff1")))
+        path = QPainterPath()
+        path.moveTo(5, 3); path.lineTo(13, 3); path.lineTo(17, 7)
+        path.lineTo(17, 20); path.lineTo(5, 20); path.closeSubpath()
+        p.drawPath(path)
+        # lupa
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor("#1976d2"), 1.8))
+        p.drawEllipse(QRectF(11, 11, 7, 7))
+        p.setPen(QPen(QColor("#1976d2"), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(17, 17, 21, 21)
+    return _make(d)
+
+
 # --- voltear (mirror) -----------------------------------------------------
 def _flip(p, horizontal: bool):
     p.setPen(QPen(QColor("#90a4ae"), 1.0, Qt.DashLine))
@@ -100,6 +119,24 @@ def _flip(p, horizontal: bool):
     else:
         p.drawPolygon(QPolygonF([QPointF(7, 10), QPointF(17, 10), QPointF(12, 3)]))
         p.drawPolygon(QPolygonF([QPointF(7, 14), QPointF(17, 14), QPointF(12, 21)]))
+
+
+# --- actualizar / sincronizar desde librerías ----------------------------
+def sync_icon() -> QIcon:
+    def d(p):
+        p.setPen(QPen(QColor("#00838f"), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        rect = QRectF(5, 5, 14, 14)
+        p.drawArc(rect, 55 * 16, 150 * 16)     # arco superior
+        p.drawArc(rect, 235 * 16, 150 * 16)    # arco inferior
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor("#00838f")))
+        # puntas de flecha en los extremos para sugerir el giro
+        p.drawPolygon(QPolygonF([QPointF(18.5, 6.0), QPointF(20.0, 11.0),
+                                 QPointF(14.8, 9.6)]))
+        p.drawPolygon(QPolygonF([QPointF(5.5, 18.0), QPointF(4.0, 13.0),
+                                 QPointF(9.2, 14.4)]))
+    return _make(d)
 
 
 def flip_h_icon() -> QIcon:
