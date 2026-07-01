@@ -139,9 +139,10 @@ class FrameTemplate:
                       w * sx, h * sy)
 
     # ---- dibujo del marco -------------------------------------------
-    def draw(self, painter, page: QRectF, dpi: float, fields: dict) -> None:
+    def draw(self, painter, page: QRectF, dpi: float, fields: dict,
+             text_scale: float = 1.0) -> None:
         if self.svg_text is None:
-            self._draw_generic(painter, page, dpi, fields)
+            self._draw_generic(painter, page, dpi, fields, text_scale)
         else:
             from PySide6.QtCore import QByteArray
             from PySide6.QtSvg import QSvgRenderer
@@ -150,7 +151,8 @@ class FrameTemplate:
             if renderer.isValid():
                 renderer.render(painter, page)
 
-    def _draw_generic(self, painter, page: QRectF, dpi: float, fields: dict) -> None:
+    def _draw_generic(self, painter, page: QRectF, dpi: float, fields: dict,
+                      text_scale: float = 1.0) -> None:
         painter.save()
         ink = QColor("#222222")
         painter.setPen(QPen(ink, max(1.0, _mm(0.4, dpi))))
@@ -185,7 +187,7 @@ class FrameTemplate:
                            cell.y() + (cell.height() - scaled.height()) / 2,
                            scaled.width(), scaled.height()), scaled)
         else:
-            f = QFont(); f.setPointSizeF(8); painter.setFont(f)
+            f = QFont(); f.setPointSizeF(8 * text_scale); painter.setFont(f)
             painter.drawText(QRectF(tb.x(), tb.y(), logo_w, th),
                              Qt.AlignCenter, "LOGO")
 
@@ -212,12 +214,12 @@ class FrameTemplate:
                 cx = fields_area.x() + ci * cw
                 if ci:
                     painter.drawLine(int(cx), int(cy), int(cx), int(cy + rh))
-                lf = QFont(); lf.setPointSizeF(6)
+                lf = QFont(); lf.setPointSizeF(6 * text_scale)
                 painter.setPen(QColor("#555555")); painter.setFont(lf)
                 painter.drawText(
                     QRectF(cx + _mm(1.5, dpi), cy + _mm(0.5, dpi), cw, rh / 2),
                     Qt.AlignLeft | Qt.AlignVCenter, label)
-                vf = QFont(); vf.setPointSizeF(9)
+                vf = QFont(); vf.setPointSizeF(9 * text_scale)
                 painter.setPen(ink); painter.setFont(vf)
                 painter.drawText(
                     QRectF(cx + _mm(1.5, dpi), cy + rh / 2 - _mm(0.5, dpi),

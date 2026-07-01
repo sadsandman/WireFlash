@@ -151,6 +151,79 @@ def save_report_pt(v: int) -> None:
     _settings().setValue("report_font_pt", int(v))
 
 
+# --- autoguardado / recuperación -----------------------------------------
+DEFAULT_AUTOSAVE = True
+DEFAULT_AUTOSAVE_MIN = 5
+MIN_AUTOSAVE_MIN, MAX_AUTOSAVE_MIN = 1, 60
+
+
+def saved_autosave_enabled() -> bool:
+    v = _settings().value("autosave_enabled", DEFAULT_AUTOSAVE)
+    if isinstance(v, str):
+        return v.lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
+def save_autosave_enabled(on: bool) -> None:
+    _settings().setValue("autosave_enabled", bool(on))
+
+
+def saved_autosave_minutes() -> int:
+    try:
+        v = int(_settings().value("autosave_minutes", DEFAULT_AUTOSAVE_MIN))
+    except (TypeError, ValueError):
+        v = DEFAULT_AUTOSAVE_MIN
+    return min(MAX_AUTOSAVE_MIN, max(MIN_AUTOSAVE_MIN, v))
+
+
+def save_autosave_minutes(v: int) -> None:
+    _settings().setValue("autosave_minutes", int(v))
+
+
+# --- tamaños de texto del PDF exportado ----------------------------------
+# tablas del BOM en puntos; cajetín y diagrama (conectores) en porcentaje.
+DEFAULT_PDF_BOM_PT = 9
+MIN_PDF_BOM_PT, MAX_PDF_BOM_PT = 6, 72
+DEFAULT_PDF_PCT = 100
+MIN_PDF_PCT, MAX_PDF_PCT = 50, 300
+
+
+def saved_pdf_bom_pt() -> int:
+    try:
+        v = int(_settings().value("pdf_bom_pt", DEFAULT_PDF_BOM_PT))
+    except (TypeError, ValueError):
+        v = DEFAULT_PDF_BOM_PT
+    return min(MAX_PDF_BOM_PT, max(MIN_PDF_BOM_PT, v))
+
+
+def save_pdf_bom_pt(v: int) -> None:
+    _settings().setValue("pdf_bom_pt", int(v))
+
+
+def _saved_pct(key: str) -> int:
+    try:
+        v = int(_settings().value(key, DEFAULT_PDF_PCT))
+    except (TypeError, ValueError):
+        v = DEFAULT_PDF_PCT
+    return min(MAX_PDF_PCT, max(MIN_PDF_PCT, v))
+
+
+def saved_pdf_title_pct() -> int:
+    return _saved_pct("pdf_title_pct")
+
+
+def save_pdf_title_pct(v: int) -> None:
+    _settings().setValue("pdf_title_pct", int(v))
+
+
+def saved_pdf_diagram_pct() -> int:
+    return _saved_pct("pdf_diagram_pct")
+
+
+def save_pdf_diagram_pct(v: int) -> None:
+    _settings().setValue("pdf_diagram_pct", int(v))
+
+
 # --- rutas de librerías externas (gestor de librerías) -------------------
 def saved_library_paths() -> list[str]:
     raw = _settings().value("library_paths", "")

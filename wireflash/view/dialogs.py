@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -141,13 +142,17 @@ class PdfExportDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """Configuración general: escala de los gráficos del lienzo."""
+    """Configuración general: escala de los gráficos y autoguardado."""
 
     def __init__(self, scale_pct: int, min_pct: int, max_pct: int,
-                 parent=None) -> None:
+                 autosave_enabled: bool = True, autosave_min: int = 5,
+                 min_autosave: int = 1, max_autosave: int = 60,
+                 pdf_bom_pt: int = 9, pdf_title_pct: int = 100,
+                 pdf_diagram_pct: int = 100, pdf_bom_range=(6, 18),
+                 pdf_pct_range=(50, 300), parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Configuración")
-        self.resize(420, 160)
+        self.resize(460, 440)
         lay = QVBoxLayout(self)
         form = QFormLayout()
 
@@ -174,12 +179,80 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True); hint.setStyleSheet("color:#90a4ae;")
         lay.addWidget(hint)
 
+        # --- autoguardado / recuperación ---
+        self.autosave_cb = QCheckBox("Autoguardado (recuperación ante cuelgues)")
+        self.autosave_cb.setChecked(autosave_enabled)
+        lay.addWidget(self.autosave_cb)
+
+        arow = QHBoxLayout()
+        self.autosave_spin = QSpinBox()
+        self.autosave_spin.setRange(min_autosave, max_autosave)
+        self.autosave_spin.setSuffix(" min")
+        self.autosave_spin.setValue(autosave_min)
+        arow.addWidget(QLabel("Guardar copia cada"))
+        arow.addWidget(self.autosave_spin)
+        arow.addStretch(1)
+        lay.addLayout(arow)
+        self.autosave_cb.toggled.connect(self.autosave_spin.setEnabled)
+        self.autosave_spin.setEnabled(autosave_enabled)
+
+        ahint = QLabel("Guarda una copia de recuperación en segundo plano. Si el "
+                       "programa se cierra por un cuelgue, al reabrir se ofrece "
+                       "restaurar ese progreso.")
+        ahint.setWordWrap(True); ahint.setStyleSheet("color:#90a4ae;")
+        lay.addWidget(ahint)
+
+        # --- tamaños de texto del PDF exportado ---
+        grp = QGroupBox("Texto del PDF exportado")
+        gf = QFormLayout(grp)
+        self.pdf_bom_spin = QSpinBox()
+        self.pdf_bom_spin.setRange(*pdf_bom_range)
+        self.pdf_bom_spin.setSuffix(" pt")
+        self.pdf_bom_spin.setValue(pdf_bom_pt)
+        gf.addRow("Tablas (BOM)", self.pdf_bom_spin)
+
+        self.pdf_title_spin = QSpinBox()
+        self.pdf_title_spin.setRange(*pdf_pct_range)
+        self.pdf_title_spin.setSuffix(" %")
+        self.pdf_title_spin.setSingleStep(10)
+        self.pdf_title_spin.setValue(pdf_title_pct)
+        gf.addRow("Cajetín", self.pdf_title_spin)
+
+        self.pdf_diagram_spin = QSpinBox()
+        self.pdf_diagram_spin.setRange(*pdf_pct_range)
+        self.pdf_diagram_spin.setSuffix(" %")
+        self.pdf_diagram_spin.setSingleStep(10)
+        self.pdf_diagram_spin.setValue(pdf_diagram_pct)
+        gf.addRow("Diagrama (conectores)", self.pdf_diagram_spin)
+        lay.addWidget(grp)
+
+        phint = QLabel("Afecta al PDF y a su vista previa. El diagrama se imprime "
+                       "tal cual la hoja del diseño (mismas posiciones y tamaños); "
+                       "el % actúa como zoom.")
+        phint.setWordWrap(True); phint.setStyleSheet("color:#90a4ae;")
+        lay.addWidget(phint)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
     def result_scale(self) -> float:
         return self.spin.value() / 100.0
+
+    def result_autosave_enabled(self) -> bool:
+        return self.autosave_cb.isChecked()
+
+    def result_autosave_minutes(self) -> int:
+        return self.autosave_spin.value()
+
+    def result_pdf_bom_pt(self) -> int:
+        return self.pdf_bom_spin.value()
+
+    def result_pdf_title_pct(self) -> int:
+        return self.pdf_title_spin.value()
+
+    def result_pdf_diagram_pct(self) -> int:
+        return self.pdf_diagram_spin.value()
 
 
 class LibraryManagerDialog(QDialog):

@@ -369,7 +369,10 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
                 p.fillRect(cell, QColor(0, 0, 0, 16) if PRINT_MODE
                            else QColor(0, 0, 0, 30))
             elif explicit:
-                p.fillRect(cell, QColor(200, 169, 96, 38))
+                # tinte suave + barra dorada OPACA junto al borde de los puertos
+                p.fillRect(cell, QColor(200, 169, 96, 30))
+                bar_y = (top + full_h - 4) if bottom_side else top + 1
+                p.fillRect(QRectF(x0 + 1, bar_y, cw - 2, 3), QColor("#c8a960"))
             if col:
                 p.setPen(QPen(_ink("#0d1b22", "#37474f"), 0.5))
                 p.drawLine(QPointF(x0, top), QPointF(x0, top + full_h))
@@ -427,9 +430,11 @@ class ConnectorItem(_NodeMixin, QGraphicsObject):
                 p.fillRect(QRectF(1, y, w - 2, PIN_H),
                            QColor(0, 0, 0, 16) if PRINT_MODE else QColor(0, 0, 0, 30))
             elif explicit:
-                # terminal asignado a propósito en este pin: banda dorada tenue
-                p.fillRect(QRectF(1, y, w - 2, PIN_H),
-                           QColor(200, 169, 96, 38))
+                # pin con terminal asignado: tinte suave + barra dorada OPACA en
+                # el borde por donde sale el puerto (legible en claro y oscuro)
+                p.fillRect(QRectF(1, y, w - 2, PIN_H), QColor(200, 169, 96, 30))
+                bar_x = (w - 4) if not left_side else 1
+                p.fillRect(QRectF(bar_x, y + 2, 3, PIN_H - 4), QColor("#c8a960"))
             num_rect = QRectF(8, y, 26, PIN_H)
             name_rect = QRectF(34, y, w - 40, PIN_H)
             na, ma = Qt.AlignLeft, Qt.AlignLeft
@@ -548,22 +553,34 @@ class CableItem(_NodeMixin, QGraphicsObject):
                       subtitle=_fmt_len(cab.length_mm),
                       subtitle2=cab.type_label(), width=w)
 
-        # filas de conductores con swatch de color
+        # filas de conductores: numero · franja de color + swatch · codigo
         top = self.content_top()
         f = QFont(); f.setPointSize(8); f.setBold(PRINT_MODE); p.setFont(f)
+        bg = _ink("#212b33", "#ffffff")
         for i, code in enumerate(cab.conductor_colors):
             y = top + i * PIN_H
+            cy = y + PIN_H / 2
             col = QColor(WIRE_COLORS.get(code, "#888888"))
-            # franja de color del conductor de extremo a extremo
-            p.fillRect(QRectF(14, y + PIN_H / 2 - 2, w - 28, 4), col)
-            # swatch
+            # chip del codigo a la derecha, con fondo propio: la franja termina
+            # antes del chip para que el texto NUNCA se pinte sobre el color
+            code_w = _text_w(code, PRINT_MODE, 8) + 12
+            chip = QRectF(w - 6 - code_w, y + 3, code_w, PIN_H - 6)
+            # franja de color del conductor, del numero hasta el chip
+            strip_x0, strip_x1 = 20.0, chip.left() - 6
+            p.fillRect(QRectF(strip_x0, cy - 2, strip_x1 - strip_x0, 4), col)
+            # swatch centrado en la franja
+            cx = (strip_x0 + strip_x1) / 2
             p.setBrush(QBrush(col)); p.setPen(QPen(QColor("#0d1b22"), 1))
-            p.drawRect(QRectF(w / 2 - 9, y + 4, 18, PIN_H - 8))
+            p.drawRect(QRectF(cx - 9, y + 4, 18, PIN_H - 8))
+            # numero del conductor (izquierda)
             p.setPen(_ink("#eceff1", "#1b2730"))
-            p.drawText(QRectF(2, y, 14, PIN_H),
+            p.drawText(QRectF(2, y, 16, PIN_H),
                        Qt.AlignVCenter | Qt.AlignHCenter, str(i + 1))
-            p.drawText(QRectF(w - 26, y, 24, PIN_H),
-                       Qt.AlignVCenter | Qt.AlignHCenter, code)
+            # chip del codigo: fondo de la caja + borde en el color del hilo
+            p.setBrush(QBrush(bg)); p.setPen(QPen(col, 1.2))
+            p.drawRoundedRect(chip, 4, 4)
+            p.setPen(_ink("#eceff1", "#1b2730"))
+            p.drawText(chip, Qt.AlignCenter, code)
 
         _paint_selection(p, self, body)
 

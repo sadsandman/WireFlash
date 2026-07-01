@@ -63,6 +63,7 @@ from ..model.library import (
     ensure_libraries_root,
     import_library_folder,
     package_image_into_project,
+    recovery_file_path,
     register_libraries,
     set_project_dir,
     LibraryTable,
@@ -307,6 +308,11 @@ class MainWindow(QMainWindow):
         self._snap_timer.setSingleShot(True)
         self._snap_timer.timeout.connect(self._commit_snapshot)
 
+        # cambios sin guardar (para autoguardado / recuperación ante cuelgues)
+        self._dirty = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+
         # estado del marco de hoja (plantilla en el lienzo)
         self.page_name = "A4"
         self.landscape = False
@@ -325,6 +331,7 @@ class MainWindow(QMainWindow):
         self._build_library_dock()
         self._build_props_dock()
         self._build_reports_dock()
+        self._build_preview_dock()
         self._build_toolbar()
         self._build_menu()
         self.statusBar().showMessage(
@@ -333,12 +340,18 @@ class MainWindow(QMainWindow):
         self.refresh_reports()
         self.set_theme(theme.saved_theme())
 
+        # autoguardado + oferta de recuperación de una sesión anterior
+        self._configure_autosave()
+        QTimer.singleShot(0, self._maybe_offer_recovery)
+
     def _make_scene(self):
         self.scene = HarnessScene(self.harness)
         self.scene.changed_model.connect(self.refresh_reports)
         self.scene.selection_info.connect(self.show_properties)
         self.scene.changed_model.connect(self._schedule_snapshot)
         self.scene.dirtied.connect(self._schedule_snapshot)
+        self.scene.changed_model.connect(self._mark_dirty)
+        self.scene.dirtied.connect(self._mark_dirty)
 
     # ----- deshacer / rehacer ----------------------------------------
     def _schedule_snapshot(self) -> None:
@@ -647,9 +660,117 @@ class MainWindow(QMainWindow):
 
         dock = QDockWidget("Reportes", self)
         dock.setWidget(wrap)
+        self._reports_dock = dock
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.resizeDocks([self._props_dock, dock], [360, 500], Qt.Vertical)
         self._apply_report_font()
+
+    # ----- vista previa de PDF (panel a la derecha) -------------------
+    def _build_preview_dock(self) -> None:
+        """Panel de vista previa del PDF (mismas páginas que la exportación),
+        con navegación por hojas, a la derecha. Se abre con Ctrl+P."""
+        from PySide6.QtPrintSupport import QPrinter, QPrintPreviewWidget
+
+        self._preview_printer = QPrinter(QPrinter.HighResolution)
+        self._preview = QPrintPreviewWidget(self._preview_printer)
+        self._preview.setSinglePageViewMode()
+        self._preview.paintRequested.connect(self._render_preview)
+        self._preview.previewChanged.connect(self._update_preview_pagelabel)
+
+        bar = QWidget(); hb = QHBoxLayout(bar)
+        hb.setContentsMargins(6, 3, 6, 3); hb.setSpacing(4)
+        b_prev = QPushButton("◀"); b_prev.setFixedWidth(30)
+        b_prev.setToolTip("Hoja anterior"); b_prev.clicked.connect(self._preview_prev)
+        b_next = QPushButton("▶"); b_next.setFixedWidth(30)
+        b_next.setToolTip("Hoja siguiente"); b_next.clicked.connect(self._preview_next)
+        self._pv_page = QLabel("—")
+        b_zout = QPushButton("－"); b_zout.setFixedWidth(30)
+        b_zout.clicked.connect(self._preview.zoomOut)
+        b_zin = QPushButton("＋"); b_zin.setFixedWidth(30)
+        b_zin.clicked.connect(self._preview.zoomIn)
+        b_fit = QPushButton("Ajustar"); b_fit.clicked.connect(self._preview.fitInView)
+        b_ref = QPushButton("⟳"); b_ref.setFixedWidth(30)
+        b_ref.setToolTip("Actualizar la vista previa")
+        b_ref.clicked.connect(self.refresh_preview)
+        self._pv_all = QCheckBox("Todo el proyecto")
+        self._pv_all.toggled.connect(lambda _=False: self.refresh_preview())
+        b_pdf = QPushButton("Guardar PDF…"); b_pdf.clicked.connect(self._preview_save_pdf)
+        for wdg in (b_prev, b_next, self._pv_page):
+            hb.addWidget(wdg)
+        hb.addSpacing(10)
+        for wdg in (b_zout, b_zin, b_fit, b_ref):
+            hb.addWidget(wdg)
+        hb.addStretch(1)
+        hb.addWidget(self._pv_all); hb.addWidget(b_pdf)
+
+        wrap = QWidget(); v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
+        v.addWidget(bar); v.addWidget(self._preview, 1)
+
+        dock = QDockWidget("Vista previa PDF", self)
+        dock.setWidget(wrap)
+        self._preview_dock = dock
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.tabifyDockWidget(self._reports_dock, dock)
+        self._reports_dock.raise_()   # arranca mostrando Reportes
+
+    def _render_preview(self, printer) -> None:
+        """Callback de QPrintPreviewWidget: pinta las páginas (idénticas al PDF)."""
+        assemblies = (self.project.assemblies if self._pv_all.isChecked()
+                      else [self.harness])
+        try:
+            pdfexport._render_to_device(
+                printer, assemblies, self._pdf_fields_base(),
+                page_name=self.page_name, landscape=self.landscape,
+                template=FrameTemplate.generic(self.project.logo),
+                **self._pdf_text_opts())
+        except Exception as exc:
+            self.statusBar().showMessage(f"No se pudo previsualizar: {exc}", 5000)
+
+    def refresh_preview(self) -> None:
+        if not hasattr(self, "_preview"):
+            return
+        pdfexport._apply_page(self._preview_printer, self.page_name, self.landscape)
+        self._preview.updatePreview()
+        self._update_preview_pagelabel()
+
+    def _update_preview_pagelabel(self) -> None:
+        try:
+            self._pv_page.setText(
+                f"{self._preview.currentPage()} / {self._preview.pageCount()}")
+        except Exception:
+            self._pv_page.setText("—")
+
+    def _preview_prev(self) -> None:
+        self._preview.setCurrentPage(max(1, self._preview.currentPage() - 1))
+
+    def _preview_next(self) -> None:
+        self._preview.setCurrentPage(
+            min(self._preview.pageCount(), self._preview.currentPage() + 1))
+
+    def toggle_preview(self) -> None:
+        """Muestra/enfoca el panel de vista previa y lo regenera (Ctrl+P)."""
+        self._preview_dock.show()
+        self._preview_dock.raise_()
+        self.refresh_preview()
+
+    def _preview_save_pdf(self) -> None:
+        whole = self._pv_all.isChecked()
+        assemblies = self.project.assemblies if whole else [self.harness]
+        name = f"{self.project.name if whole else self.harness.name}.pdf"
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar PDF", name, "PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            pdfexport.export_pdf(
+                assemblies, path, self._pdf_fields_base(),
+                page_name=self.page_name, landscape=self.landscape,
+                template=FrameTemplate.generic(self.project.logo),
+                **self._pdf_text_opts())
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"No se pudo exportar el PDF:\n{exc}")
+            return
+        self.statusBar().showMessage(f"PDF exportado: {path}", 6000)
 
     def _apply_report_font(self) -> None:
         f = QFont()
@@ -677,8 +798,8 @@ class MainWindow(QMainWindow):
         self._tb_action(tb, icons.save_icon(), "Guardar", self.save_file,
                         "Guardar proyecto (Ctrl+S)")
         self._tb_action(tb, icons.preview_icon(), "Vista previa",
-                        self.preview_assembly_pdf,
-                        "Vista previa de impresión")
+                        self.toggle_preview,
+                        "Vista previa PDF en panel lateral (Ctrl+P)")
         self._tb_action(tb, icons.pdf_icon(), "PDF", self.export_assembly_pdf,
                         "Exportar ensamblaje a PDF")
         tb.addSeparator()
@@ -753,10 +874,13 @@ class MainWindow(QMainWindow):
         # exportar agrupado: PDF + CSV
         ex = m.addMenu("Exportar")
         pdf = ex.addMenu("PDF (BOM + diagrama)")
-        self._act(pdf, "Vista previa de impresión…", None,
+        self._act(pdf, "Vista previa PDF (panel)…", QKeySequence.Print,
+                  self.toggle_preview)
+        self._act(pdf, "Vista previa de impresión (diálogo)…", None,
                   self.preview_assembly_pdf)
+        pdf.addSeparator()
         self._act(pdf, "Proyecto completo…", None, self.export_project_pdf)
-        self._act(pdf, "Ensamblaje actual… (imprimir)", QKeySequence.Print,
+        self._act(pdf, "Ensamblaje actual…", QKeySequence("Ctrl+Shift+P"),
                   self.export_assembly_pdf)
         csv = ex.addMenu("CSV")
         self._act(csv, "BOM compras (totales)…", None,
@@ -912,9 +1036,26 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dlg = SettingsDialog(
             int(round(self._graphics_scale * 100)),
-            int(theme.MIN_SCALE * 100), int(theme.MAX_SCALE * 100), self)
+            int(theme.MIN_SCALE * 100), int(theme.MAX_SCALE * 100),
+            autosave_enabled=theme.saved_autosave_enabled(),
+            autosave_min=theme.saved_autosave_minutes(),
+            min_autosave=theme.MIN_AUTOSAVE_MIN,
+            max_autosave=theme.MAX_AUTOSAVE_MIN,
+            pdf_bom_pt=theme.saved_pdf_bom_pt(),
+            pdf_title_pct=theme.saved_pdf_title_pct(),
+            pdf_diagram_pct=theme.saved_pdf_diagram_pct(),
+            pdf_bom_range=(theme.MIN_PDF_BOM_PT, theme.MAX_PDF_BOM_PT),
+            pdf_pct_range=(theme.MIN_PDF_PCT, theme.MAX_PDF_PCT),
+            parent=self)
         if dlg.exec():
             self.set_graphics_scale(dlg.result_scale())
+            theme.save_autosave_enabled(dlg.result_autosave_enabled())
+            theme.save_autosave_minutes(dlg.result_autosave_minutes())
+            theme.save_pdf_bom_pt(dlg.result_pdf_bom_pt())
+            theme.save_pdf_title_pct(dlg.result_pdf_title_pct())
+            theme.save_pdf_diagram_pct(dlg.result_pdf_diagram_pct())
+            self._configure_autosave()
+            self.refresh_preview()   # refleja los nuevos tamaños en la previa
 
     def set_graphics_scale(self, scale: float) -> None:
         self._graphics_scale = scale
@@ -1851,6 +1992,8 @@ class MainWindow(QMainWindow):
         self._load_all_libraries()   # descarta la tabla por-proyecto anterior
         self._refresh_assembly_list()
         self._reload_scene()
+        self._mark_clean()
+        self._clear_recovery()
 
     def open_file(self):
         flt = (f"Proyecto ({'*' + PROJECT_EXT});;"
@@ -1880,6 +2023,8 @@ class MainWindow(QMainWindow):
             self._load_all_libraries()   # aplica la tabla por-proyecto si existe
             self._refresh_assembly_list()
             self._reload_scene()
+            self._mark_clean()
+            self._clear_recovery()
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"No se pudo abrir:\n{exc}")
 
@@ -1894,6 +2039,8 @@ class MainWindow(QMainWindow):
         if self.current_path:
             self._save_to(self.current_path)
             self.statusBar().showMessage(f"Guardado en {self.current_path}", 4000)
+            self._mark_clean()
+            self._clear_recovery()
             self.refresh_reports()
         else:
             self.save_file_as()
@@ -1930,6 +2077,8 @@ class MainWindow(QMainWindow):
             return
         self.current_path = path
         set_project_dir(os.path.dirname(path))
+        self._mark_clean()
+        self._clear_recovery()
         if os.path.splitext(path)[1].lower() == PROJECT_EXT:
             self.statusBar().showMessage(
                 f"Proyecto guardado en la carpeta: {os.path.dirname(path)}", 6000)
@@ -1954,6 +2103,111 @@ class MainWindow(QMainWindow):
             return
         self.harness.filename = os.path.basename(path)
         self.statusBar().showMessage(f"Ensamblaje guardado: {path}", 4000)
+
+    # ----- autoguardado / recuperación ante cuelgues -----------------
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+
+    def _mark_clean(self) -> None:
+        self._dirty = False
+
+    def _configure_autosave(self) -> None:
+        """(Re)inicia el temporizador de autoguardado según la configuración."""
+        self._autosave_timer.stop()
+        if theme.saved_autosave_enabled():
+            self._autosave_timer.start(theme.saved_autosave_minutes() * 60_000)
+
+    def _autosave_tick(self) -> None:
+        if self._dirty:
+            self._write_recovery()
+
+    def _write_recovery(self) -> None:
+        """Escribe una copia autocontenida del proyecto para recuperación."""
+        import json
+        from datetime import datetime
+        try:
+            data = {
+                "kind": "recovery",
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "original_path": self.current_path or "",
+                "active": self._active,
+                "project": self.project.to_dict(),
+            }
+            with open(recovery_file_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            self.statusBar().showMessage("Copia de recuperación guardada", 2000)
+        except Exception:
+            pass   # el autoguardado nunca debe interrumpir el trabajo
+
+    def _clear_recovery(self) -> None:
+        try:
+            p = recovery_file_path()
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+    def _maybe_offer_recovery(self) -> None:
+        """Al arrancar: si quedó una copia de recuperación (cierre no limpio),
+        ofrece restaurarla."""
+        import json
+        p = recovery_file_path()
+        if not os.path.exists(p):
+            return
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            self._clear_recovery()
+            return
+        when = data.get("saved_at", "")
+        orig = data.get("original_path", "")
+        detail = f"\nGuardado: {when}" if when else ""
+        if orig:
+            detail += f"\nProyecto: {orig}"
+        ret = QMessageBox.question(
+            self, "Recuperar progreso",
+            "Se encontró una copia de autoguardado de una sesión anterior que no "
+            "se cerró correctamente." + detail +
+            "\n\n¿Quieres recuperar ese progreso?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            self._clear_recovery()
+            return
+        try:
+            self.project = Project.from_dict(data.get("project", {}))
+            self._active = max(0, min(int(data.get("active", 0)),
+                                      len(self.project.assemblies) - 1))
+            self.harness = self.project.assemblies[self._active]
+            self.current_path = orig or None
+            set_project_dir(os.path.dirname(orig) if orig else "")
+            self._load_all_libraries()
+            self._refresh_assembly_list()
+            self._reload_scene()
+            self._update_project_label()
+            self._dirty = True   # recuperado, pero aún sin guardar en su archivo
+            self.statusBar().showMessage("Progreso recuperado sin guardar", 6000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"No se pudo recuperar:\n{exc}")
+            self._clear_recovery()
+
+    def closeEvent(self, event):
+        if self._dirty:
+            ret = QMessageBox.question(
+                self, "Salir",
+                "Hay cambios sin guardar. ¿Guardar antes de salir?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            if ret == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if ret == QMessageBox.Save:
+                self.save_file()
+                if self._dirty:   # el guardado se canceló -> no cerrar
+                    event.ignore()
+                    return
+        # cierre limpio: descarta la copia de recuperación
+        self._clear_recovery()
+        super().closeEvent(event)
 
     # ----- copiar / cortar / pegar (nodos) ---------------------------
     def copy_selection(self) -> bool:
@@ -2072,6 +2326,14 @@ class MainWindow(QMainWindow):
         return {"project": self.project.name, "author": self.project.author,
                 "version": self.project.version, "logo": self.project.logo}
 
+    def _pdf_text_opts(self) -> dict:
+        """Tamaños de texto del PDF (tablas/cajetín/diagrama) configurables."""
+        return {
+            "bom_pt": theme.saved_pdf_bom_pt(),
+            "title_scale": theme.saved_pdf_title_pct() / 100.0,
+            "diagram_scale": theme.saved_pdf_diagram_pct() / 100.0,
+        }
+
     def _pdf_options(self):
         """Muestra el diálogo de opciones (tamaño/orientación/plantilla) y
         devuelve ``(opciones, template)`` o ``None`` si se cancela."""
@@ -2105,7 +2367,7 @@ class MainWindow(QMainWindow):
             pdfexport.export_pdf(
                 harnesses, path, self._pdf_fields_base(),
                 page_name=o["page_name"], landscape=o["landscape"],
-                template=template)
+                template=template, **self._pdf_text_opts())
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"No se pudo exportar el PDF:\n{exc}")
             return
@@ -2123,7 +2385,7 @@ class MainWindow(QMainWindow):
             pdfexport.preview_pdf(
                 self, [self.harness], self._pdf_fields_base(),
                 page_name=o["page_name"], landscape=o["landscape"],
-                template=template)
+                template=template, **self._pdf_text_opts())
         except Exception as exc:
             QMessageBox.critical(self, "Error",
                                  f"No se pudo previsualizar:\n{exc}")

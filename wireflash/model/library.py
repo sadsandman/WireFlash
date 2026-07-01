@@ -632,6 +632,18 @@ def ensure_assemblies_root() -> str:
     return ASSEMBLIES_ROOT
 
 
+# ---- recuperación ante cuelgues (autoguardado) --------------------------
+# Un JSON autocontenido con el proyecto completo. Mientras este archivo exista
+# significa que la sesión anterior NO se cerró de forma limpia (posible cuelgue)
+# y por tanto hay progreso que ofrecer para recuperar.
+RECOVERY_FILE = os.path.join(_PROJECT_ROOT, "recuperacion.wfbak")
+
+
+def recovery_file_path() -> str:
+    """Ruta del archivo de autoguardado/recuperación."""
+    return RECOVERY_FILE
+
+
 def discover_assemblies(root: str | None = None) -> list[tuple[str, str]]:
     """Lista los ensamblajes guardados como ``(nombre, ruta)``."""
     root = root or ASSEMBLIES_ROOT
